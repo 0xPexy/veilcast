@@ -1,0 +1,6 @@
+.env.backend
+.env.frontend
+
+*.log
+.DS_Store
+

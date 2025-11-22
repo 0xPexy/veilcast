@@ -1,0 +1,18 @@
+# Global ignores for VeilCast monorepo
+
+# OS / editor
+.DS_Store
+*.swp
+*.swo
+*.log
+node_modules
+dist
+
+# Env / secrets
+.env
+*.env.local
+
+# Docker
+*.pid
+*.cid
+

@@ -1,0 +1,28 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: ../backend
+    container_name: veilcast-backend
+    env_file:
+      - .env.backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../backend:/app
+
+  frontend:
+    build:
+      context: ../frontend
+    container_name: veilcast-frontend
+    depends_on:
+      - backend
+    env_file:
+      - .env.frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ../frontend:/app
+      - /app/node_modules
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 5173"

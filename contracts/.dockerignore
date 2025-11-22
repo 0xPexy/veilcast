@@ -1,0 +1,8 @@
+.git
+node_modules
+out
+cache
+foundry_cache
+lib
+.env
+*.log
