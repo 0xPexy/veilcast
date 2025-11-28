@@ -1,0 +1,9 @@
+choice = ""
+commitment = ""
+identity_secret = ""
+membership_root = ""
+nullifier = ""
+path_bits = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+path_siblings = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+poll_id = ""
+secret = ""

@@ -38,7 +38,13 @@ Artifacts stay in `zk/<circuit>/proofs` and `target`. The image is always rebuil
 ## Included example circuit
 
 - Path: `zk/src/main.nr`
-- Purpose: commit-reveal consistency for a yes/no poll.
-  - Public inputs: `commitment`, `nullifier`, `poll_id`
-  - Private inputs: `choice`, `secret`, `identity_secret`
-  - Constraints: `commitment = Poseidon(choice, secret)`, `nullifier = Poseidon(identity_secret, poll_id)`, `choice` is boolean.
+- Purpose: commit–reveal consistency + group membership for a yes/no poll.
+  - Public inputs: `commitment`, `nullifier`, `poll_id`, `membership_root`
+  - Private inputs: `choice`, `secret`, `identity_secret`, `path_siblings[20]`, `path_bits[20]`
+  - Hash: Poseidon (via `poseidon` dep) — `hash_1` for leaf, `hash_2` for internal nodes/commit/nullifier.
+  - Constraints:
+    - choice is boolean (0/1)
+    - membership: `leaf = hash_1([identity_secret])`; fold Merkle path (bit=0 left, 1 right) → `membership_root`
+    - commitment: `commitment == hash_2([choice, secret])`
+    - nullifier: `nullifier == hash_2([identity_secret, poll_id])`
+  - Tests: `nargo test` covers happy path + invalid choice, wrong commitment, wrong Merkle path, wrong poll_id for nullifier.

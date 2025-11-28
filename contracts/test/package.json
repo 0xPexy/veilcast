@@ -1,0 +1,14 @@
+{
+  "name": "veilcast-contracts-test",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "proof": "node scripts/generate_proof.js"
+  },
+  "dependencies": {
+    "@aztec/bb.js": "2.1.8",
+    "@noir-lang/noir_js": "1.0.0-beta.15",
+    "ethers": "6.13.2"
+  }
+}
