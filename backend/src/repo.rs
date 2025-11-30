@@ -63,6 +63,18 @@ pub trait PollStore {
     async fn record_vote(&self, vote: StoredVote<'_>) -> AppResult<StoredVoteRecord>;
 }
 
+#[async_trait]
+pub trait PollIndexSink {
+    async fn upsert_poll_from_chain(&self, poll_id: i64, poll: NewPoll<'_>) -> AppResult<()>;
+    async fn upsert_vote_from_chain(
+        &self,
+        poll_id: i64,
+        nullifier: &str,
+        choice: u8,
+    ) -> AppResult<()>;
+    async fn resolve_poll_from_chain(&self, poll_id: i64, correct_option: u8) -> AppResult<()>;
+}
+
 /// Postgres-backed store.
 #[derive(Clone)]
 pub struct PgStore {
@@ -153,6 +165,72 @@ impl PollStore for PgStore {
         .await
         .map_err(AppError::Db)?;
         Ok(rec.into())
+    }
+}
+
+#[async_trait]
+impl PollIndexSink for PgStore {
+    async fn upsert_poll_from_chain(&self, poll_id: i64, poll: NewPoll<'_>) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO polls (id, question, options, commit_phase_end, reveal_phase_end, membership_root, resolved)
+            VALUES ($1, $2, $3, $4, $5, $6, false)
+            ON CONFLICT (id) DO UPDATE SET
+              question = EXCLUDED.question,
+              options = EXCLUDED.options,
+              commit_phase_end = EXCLUDED.commit_phase_end,
+              reveal_phase_end = EXCLUDED.reveal_phase_end,
+              membership_root = EXCLUDED.membership_root
+            "#,
+        )
+        .bind(poll_id)
+        .bind(poll.question)
+        .bind(serde_json::to_value(poll.options).unwrap())
+        .bind(poll.commit_phase_end)
+        .bind(poll.reveal_phase_end)
+        .bind(poll.membership_root)
+        .execute(&self.pool)
+        .await
+        .map_err(AppError::Db)?;
+        Ok(())
+    }
+
+    async fn upsert_vote_from_chain(
+        &self,
+        poll_id: i64,
+        nullifier: &str,
+        choice: u8,
+    ) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO votes (poll_id, nullifier, choice)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (poll_id, nullifier) DO NOTHING
+            "#,
+        )
+        .bind(poll_id)
+        .bind(nullifier)
+        .bind(choice as i16)
+        .execute(&self.pool)
+        .await
+        .map_err(AppError::Db)?;
+        Ok(())
+    }
+
+    async fn resolve_poll_from_chain(&self, poll_id: i64, correct_option: u8) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE polls
+            SET resolved = true, correct_option = $2
+            WHERE id = $1
+            "#,
+        )
+        .bind(poll_id)
+        .bind(correct_option as i16)
+        .execute(&self.pool)
+        .await
+        .map_err(AppError::Db)?;
+        Ok(())
     }
 }
 
@@ -268,6 +346,50 @@ impl PollStore for InMemoryStore {
         };
         self.votes.write().await.push(rec.clone());
         Ok(rec)
+    }
+}
+
+#[async_trait]
+impl PollIndexSink for InMemoryStore {
+    async fn upsert_poll_from_chain(&self, poll_id: i64, poll: NewPoll<'_>) -> AppResult<()> {
+        let mut polls = self.polls.write().await;
+        polls.insert(
+            poll_id,
+            PollRecord {
+                id: poll_id,
+                question: poll.question.to_string(),
+                options: poll.options.to_vec(),
+                commit_phase_end: poll.commit_phase_end,
+                reveal_phase_end: poll.reveal_phase_end,
+                membership_root: poll.membership_root.to_string(),
+                correct_option: None,
+                resolved: false,
+            },
+        );
+        Ok(())
+    }
+
+    async fn upsert_vote_from_chain(
+        &self,
+        poll_id: i64,
+        nullifier: &str,
+        _choice: u8,
+    ) -> AppResult<()> {
+        self.votes.write().await.push(StoredVoteRecord {
+            poll_id,
+            nullifier: nullifier.to_string(),
+            recorded_at: Utc::now(),
+        });
+        Ok(())
+    }
+
+    async fn resolve_poll_from_chain(&self, poll_id: i64, correct_option: u8) -> AppResult<()> {
+        let mut polls = self.polls.write().await;
+        if let Some(p) = polls.get_mut(&poll_id) {
+            p.resolved = true;
+            p.correct_option = Some(correct_option as i16);
+        }
+        Ok(())
     }
 }
 

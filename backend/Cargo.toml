@@ -23,6 +23,9 @@ tower = "0.4"
 http = "1"
 hyper = { version = "1", features = ["full"] }
 sha2 = "0.10"
+ethers = { version = "2", default-features = false, features = ["abigen", "ws"] }
+utoipa = { version = "4", features = ["chrono"] }
+utoipa-swagger-ui = { version = "7", features = ["axum"] }
 
 [dev-dependencies]
 axum = { version = "0.7", features = ["macros", "json"] }

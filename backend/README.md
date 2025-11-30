@@ -12,6 +12,8 @@
 ```bash
 cd backend
 DATABASE_URL=postgres://veilcast:veilcast@localhost:5432/veilcast cargo run
+# 인덱서까지 돌리려면 (WS 엔드포인트/컨트랙트 주소 필요)
+# RPC_WS=ws://localhost:8545 CONTRACT_ADDRESS=0x... INDEXER_FROM_BLOCK=0 cargo run
 ```
 
 또는 Docker:
@@ -31,3 +33,4 @@ cargo test
 - `PollStore` trait으로 DB 추상화, `PgStore`는 기본 schema 자동 생성.
 - `ZkBackend` trait으로 프루프 생성/검증을 모듈화. 실제 bb.js 연동 시 이 부분 교체.
 - Phase는 현재 시각으로 계산하여 commit/reveal 윈도우 검증.
+- 인덱서: `ethers-rs` WS 로그 구독 → `PollIndexSink` trait을 통해 DB에 반영 (PollCreated, VoteRevealed, PollResolved).

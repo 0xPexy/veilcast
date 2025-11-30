@@ -1,8 +1,12 @@
+mod doc;
 mod error;
+mod indexer;
 mod repo;
 mod zk;
 
+use crate::doc::ApiDoc;
 use crate::error::{AppError, AppResult};
+use crate::indexer::{spawn_indexer, IndexerConfig};
 use crate::repo::{
     InMemoryStore, NewPoll, PgStore, PollRecord, PollStore, StoredCommit, StoredVote,
 };
@@ -13,11 +17,14 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
+use ethers::core::types::H160;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::Arc;
-use tokio::task::JoinHandle;
 use tracing::info;
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 #[derive(Clone)]
 struct AppState<S, B> {
@@ -56,7 +63,7 @@ impl Phase {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 struct CreatePollRequest {
     question: String,
     options: Vec<String>,
@@ -65,7 +72,7 @@ struct CreatePollRequest {
     membership_root: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 struct PollResponse {
     id: i64,
     question: String,
@@ -78,26 +85,26 @@ struct PollResponse {
     phase: Phase,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 struct CommitRequest {
     commitment: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 struct CommitResponse {
     poll_id: i64,
     commitment: String,
     recorded_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 struct ProveRequest {
     choice: u8,
     secret: String,
     identity_secret: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 struct RevealRequest {
     proof: String,
     public_inputs: Vec<String>,
@@ -105,7 +112,7 @@ struct RevealRequest {
     nullifier: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 struct RevealResponse {
     poll_id: i64,
     nullifier: String,
@@ -126,7 +133,8 @@ async fn main() -> Result<(), AppError> {
     let zk = Arc::new(NoopZkBackend::default());
 
     let app_state = AppState::new(store, zk);
-    let app = app_router(app_state.clone());
+    let app = app_router(app_state.clone())
+        .merge(SwaggerUi::new("/docs").url("/docs/openapi.json", ApiDoc::openapi()));
 
     let addr: SocketAddr = cfg.bind.parse().expect("invalid bind addr");
     info!("Starting VeilCast backend on {}", addr);
@@ -135,8 +143,17 @@ async fn main() -> Result<(), AppError> {
         app.into_make_service(),
     );
 
-    // Optional: spawn a lightweight indexer placeholder.
-    let _indexer = spawn_indexer(app_state);
+    if let (Some(rpc_ws), Some(contract)) = (cfg.rpc_ws.clone(), cfg.contract_address) {
+        let idx_cfg = IndexerConfig {
+            rpc_ws,
+            contract_address: contract,
+            from_block: cfg.indexer_from_block,
+        };
+        let _indexer = spawn_indexer(idx_cfg, app_state.store.clone());
+        info!("Indexer spawned");
+    } else {
+        info!("Indexer not started (missing RPC_WS or CONTRACT_ADDRESS)");
+    }
 
     server.await?;
     Ok(())
@@ -322,6 +339,9 @@ fn to_response(record: PollRecord) -> PollResponse {
 struct Config {
     database_url: String,
     bind: String,
+    rpc_ws: Option<String>,
+    contract_address: Option<H160>,
+    indexer_from_block: Option<u64>,
 }
 
 impl Config {
@@ -329,21 +349,21 @@ impl Config {
         let database_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://veilcast:veilcast@localhost:5432/veilcast".to_string());
         let bind = std::env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8000".to_string());
-        Self { database_url, bind }
-    }
-}
-
-fn spawn_indexer<S, B>(_state: AppState<S, B>) -> JoinHandle<()>
-where
-    S: PollStore + Send + Sync + 'static,
-    B: ZkBackend + Send + Sync + 'static,
-{
-    tokio::spawn(async move {
-        // Placeholder for event indexer; keep task alive for future expansion.
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        let rpc_ws = std::env::var("RPC_WS").ok();
+        let contract_address = std::env::var("CONTRACT_ADDRESS")
+            .ok()
+            .and_then(|s| H160::from_str(&s).ok());
+        let indexer_from_block = std::env::var("INDEXER_FROM_BLOCK")
+            .ok()
+            .and_then(|s| s.parse().ok());
+        Self {
+            database_url,
+            bind,
+            rpc_ws,
+            contract_address,
+            indexer_from_block,
         }
-    })
+    }
 }
 
 #[cfg(test)]
