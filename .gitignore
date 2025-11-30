@@ -23,3 +23,7 @@ zk/target/veilcast.gz
 zk/target/vk
 zk/target/vk_hash
 zk/target/Verifier.sol
+
+# Rust build output
+/target
+backend/target
