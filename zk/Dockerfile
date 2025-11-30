@@ -1,7 +1,7 @@
 FROM rust:1.81-slim
 
 # Pin versions for reproducibility (override as needed)
-ARG NOIR_VERSION=1.0.0-beta.13
+ARG NOIR_VERSION=1.0.0-beta.15
 ARG NOIRUP_URL=https://raw.githubusercontent.com/noir-lang/noirup/main/install
 ARG BBUP_URL=https://raw.githubusercontent.com/noir-lang/barretenberg/main/scripts/install_bbup.sh
 
@@ -29,7 +29,7 @@ RUN set -eux; \
     curl -fsSL ${BBUP_URL} -o /tmp/bbup_install.sh; \
     bash /tmp/bbup_install.sh; \
     if [ -x "$HOME/.bbup/bin/bbup" ]; then \
-      "$HOME/.bbup/bin/bbup"; \
+      "$HOME/.bbup/bin/bbup" -v 3.0.0-nightly.20251104; \
     else \
       echo "bbup not found after install; check BBUP_URL" >&2; exit 1; \
     fi; \

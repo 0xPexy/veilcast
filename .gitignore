@@ -16,3 +16,10 @@ dist
 *.pid
 *.cid
 
+# ZK artifacts (generated)
+zk/target/proof
+zk/target/public_inputs
+zk/target/veilcast.gz
+zk/target/vk
+zk/target/vk_hash
+zk/target/Verifier.sol

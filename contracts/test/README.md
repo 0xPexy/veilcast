@@ -10,6 +10,9 @@ npm install
 
 ## 사용 예시
 - FFI 테스트 실행: `cd .. && FOUNDRY_FFI=1 forge test --ffi`
-- 단독 proof 생성: `npm run proof -- <args>` (스크립트: `scripts/generate_proof.js`)
+- 단독 proof 생성: `npm run proof -- <pollId> <choice> <secret> <identitySecret>` (스크립트: `scripts/generate_proof.js`)
+- Verifier 재생성: `bash scripts/generate_verifier_contract.sh`  
+  - 입력: `zk/target/vk` (미리 `bb write_vk` 등으로 생성)  
+  - 출력: `contracts/src/Verifier.sol` ( `bb write_solidity_verifier --oracle_hash keccak` 호출)
 
 Note: Node 18+ 기준, ESM(`type: "module"`)을 사용합니다. CI에서도 `npm ci` 후 `forge test --ffi`를 수행하세요.

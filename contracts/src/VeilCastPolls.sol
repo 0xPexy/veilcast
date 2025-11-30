@@ -130,7 +130,12 @@ contract VeilCastPolls is Ownable {
 
         nullifierUsed[pollId][nullifier] = true;
 
-        bool ok = verifier.verify(proof, publicInputs);
+        bool ok;
+        try verifier.verify(proof, publicInputs) returns (bool success) {
+            ok = success;
+        } catch {
+            revert VerifyFailed();
+        }
         if (!ok) revert VerifyFailed();
 
         // Optional strict commit linkage: uncomment to enforce prior commit
