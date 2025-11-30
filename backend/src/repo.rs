@@ -58,6 +58,7 @@ pub struct StoredVoteRecord {
 #[async_trait]
 pub trait PollStore {
     async fn create_poll(&self, poll: NewPoll<'_>) -> AppResult<PollRecord>;
+    async fn list_polls(&self, limit: i64) -> AppResult<Vec<PollRecord>>;
     async fn get_poll(&self, poll_id: i64) -> AppResult<PollRecord>;
     async fn record_commit(&self, commit: StoredCommit<'_>) -> AppResult<StoredCommitRecord>;
     async fn record_vote(&self, vote: StoredVote<'_>) -> AppResult<StoredVoteRecord>;
@@ -113,6 +114,22 @@ impl PollStore for PgStore {
         .map_err(AppError::Db)?;
 
         Ok(rec.into())
+    }
+
+    async fn list_polls(&self, limit: i64) -> AppResult<Vec<PollRecord>> {
+        let rows = sqlx::query_as::<_, DbPoll>(
+            r#"
+            SELECT id, question, options, commit_phase_end, reveal_phase_end, membership_root, correct_option, resolved
+            FROM polls
+            ORDER BY id DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AppError::Db)?;
+        Ok(rows.into_iter().map(Into::into).collect())
     }
 
     async fn get_poll(&self, poll_id: i64) -> AppResult<PollRecord> {
@@ -321,6 +338,14 @@ impl PollStore for InMemoryStore {
         };
         polls.insert(id, record.clone());
         Ok(record)
+    }
+
+    async fn list_polls(&self, limit: i64) -> AppResult<Vec<PollRecord>> {
+        let polls = self.polls.read().await;
+        let mut vals: Vec<_> = polls.values().cloned().collect();
+        vals.sort_by_key(|p| -(p.id as i64));
+        vals.truncate(limit as usize);
+        Ok(vals)
     }
 
     async fn get_poll(&self, poll_id: i64) -> AppResult<PollRecord> {

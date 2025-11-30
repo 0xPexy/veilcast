@@ -6,6 +6,7 @@ WORKDIR /app
 COPY package*.json ./
 COPY tsconfig.json vite.config.ts ./
 COPY index.html ./
+COPY tailwind.config.js postcss.config.js ./
 
 # Copy source
 COPY src ./src

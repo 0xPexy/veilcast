@@ -166,7 +166,7 @@ where
 {
     Router::new()
         .route("/health", get(health))
-        .route("/polls", post(create_poll::<S, B>))
+        .route("/polls", post(create_poll::<S, B>).get(list_polls::<S, B>))
         .route("/polls/:id", get(get_poll::<S, B>))
         .route("/polls/:id/commit", post(record_commit::<S, B>))
         .route("/polls/:id/prove", post(generate_proof::<S, B>))
@@ -216,6 +216,16 @@ where
 {
     let record = state.store.get_poll(poll_id).await?;
     Ok(Json(to_response(record)))
+}
+
+async fn list_polls<S, B>(
+    State(state): State<AppState<S, B>>,
+) -> Result<Json<Vec<PollResponse>>, AppError>
+where
+    S: PollStore + Send + Sync,
+{
+    let records = state.store.list_polls(50).await?;
+    Ok(Json(records.into_iter().map(to_response).collect()))
 }
 
 async fn record_commit<S, B>(

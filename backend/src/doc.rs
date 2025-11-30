@@ -11,6 +11,7 @@ use utoipa::OpenApi;
     paths(
         health_doc,
         create_poll_doc,
+        list_polls_doc,
         get_poll_doc,
         record_commit_doc,
         generate_proof_doc,
@@ -49,6 +50,13 @@ pub async fn health_doc() {}
     responses((status = 200, body = PollResponse))
 )]
 pub async fn create_poll_doc() {}
+
+#[utoipa::path(
+    get,
+    path = "/polls",
+    responses((status = 200, body = [PollResponse]))
+)]
+pub async fn list_polls_doc() {}
 
 #[utoipa::path(
     get,
