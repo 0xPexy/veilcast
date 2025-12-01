@@ -89,7 +89,7 @@ where
     Ok(())
 }
 
-async fn handle_log<S>(store: &Arc<S>, log: Log) -> AppResult<()>
+pub async fn handle_log<S>(store: &Arc<S>, log: Log) -> AppResult<()>
 where
     S: PollIndexSink + Send + Sync + 'static,
 {

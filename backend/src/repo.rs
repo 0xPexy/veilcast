@@ -315,6 +315,7 @@ impl From<DbVote> for StoredVoteRecord {
 
 /// Simple in-memory store for tests.
 #[derive(Default, Clone)]
+#[allow(dead_code)]
 pub struct InMemoryStore {
     polls: Arc<RwLock<HashMap<i64, PollRecord>>>,
     commits: Arc<RwLock<Vec<StoredCommitRecord>>>,
@@ -432,22 +433,54 @@ async fn init_schema(pool: &Pool<Postgres>) -> AppResult<()> {
             correct_option SMALLINT,
             resolved BOOLEAN NOT NULL DEFAULT false,
             created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-        );
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS commitments (
             id SERIAL PRIMARY KEY,
             poll_id BIGINT NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
             commitment TEXT NOT NULL,
             recorded_at TIMESTAMPTZ NOT NULL DEFAULT now()
-        );
-        CREATE UNIQUE INDEX IF NOT EXISTS commitments_poll_commitment_idx ON commitments(poll_id, commitment);
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    sqlx::query(
+        r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS commitments_poll_commitment_idx ON commitments(poll_id, commitment)
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS votes (
             id SERIAL PRIMARY KEY,
             poll_id BIGINT NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
             nullifier TEXT NOT NULL,
             choice SMALLINT NOT NULL,
             recorded_at TIMESTAMPTZ NOT NULL DEFAULT now()
-        );
-        CREATE UNIQUE INDEX IF NOT EXISTS votes_nullifier_idx ON votes(poll_id, nullifier);
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    sqlx::query(
+        r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS votes_nullifier_idx ON votes(poll_id, nullifier)
         "#,
     )
     .execute(pool)

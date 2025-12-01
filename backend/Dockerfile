@@ -1,4 +1,4 @@
-FROM rust:1.81-slim AS builder
+FROM rust:trixie AS builder
 
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates && rm -rf /var/lib/apt/lists/*

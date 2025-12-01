@@ -1,8 +1,8 @@
+#![allow(dead_code)]
 //! OpenAPI / Swagger documentation definitions.
 use crate::zk::ProofBundle;
-use crate::{
-    CommitRequest, CommitResponse, CreatePollRequest, PollResponse, ProveRequest, RevealRequest,
-    RevealResponse,
+use crate::types::{
+    CommitRequest, CommitResponse, CreatePollRequest, PollResponse, ProveRequest, RevealRequest, RevealResponse,
 };
 use utoipa::OpenApi;
 

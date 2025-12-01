@@ -11,8 +11,8 @@ import { ProfilePage } from './pages/Profile';
 import { PollDetailPage } from './pages/PollDetail';
 
 const queryClient = new QueryClient();
-const chainId = Number(import.meta.env.VITE_CHAIN_ID ?? 11155111);
-const rpcUrl = import.meta.env.VITE_RPC_URL ?? 'https://rpc.sepolia.org';
+const chainId = Number(import.meta.env.CHAIN_ID ?? 11155111);
+const rpcUrl = import.meta.env.RPC_URL ?? 'https://rpc.sepolia.org';
 const chain = [mainnet, sepolia].find((c) => c.id === chainId) ?? sepolia;
 
 const wagmiConfig = createConfig({

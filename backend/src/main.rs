@@ -2,13 +2,17 @@ mod doc;
 mod error;
 mod indexer;
 mod repo;
+mod types;
 mod zk;
 
 use crate::doc::ApiDoc;
 use crate::error::{AppError, AppResult};
 use crate::indexer::{spawn_indexer, IndexerConfig};
-use crate::repo::{
-    InMemoryStore, NewPoll, PgStore, PollRecord, PollStore, StoredCommit, StoredVote,
+use crate::repo::{NewPoll, PgStore, PollRecord, PollStore, StoredCommit, StoredVote};
+#[cfg(test)]
+use crate::repo::InMemoryStore;
+use crate::types::{
+    CommitRequest, CommitResponse, CreatePollRequest, Phase, PollResponse, ProveRequest, RevealRequest, RevealResponse,
 };
 use crate::zk::{NoopZkBackend, ProofBundle, ProofRequest, ZkBackend};
 use axum::extract::{Path, State};
@@ -16,9 +20,8 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use ethers::core::types::H160;
-use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -36,87 +39,6 @@ impl<S, B> AppState<S, B> {
     fn new(store: Arc<S>, zk: Arc<B>) -> Self {
         Self { store, zk }
     }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum Phase {
-    Commit,
-    Reveal,
-    Resolved,
-}
-
-impl Phase {
-    fn from_times(
-        now: DateTime<Utc>,
-        commit_end: DateTime<Utc>,
-        reveal_end: DateTime<Utc>,
-        resolved: bool,
-    ) -> Self {
-        if resolved || now >= reveal_end {
-            Phase::Resolved
-        } else if now >= commit_end {
-            Phase::Reveal
-        } else {
-            Phase::Commit
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
-struct CreatePollRequest {
-    question: String,
-    options: Vec<String>,
-    commit_phase_end: DateTime<Utc>,
-    reveal_phase_end: DateTime<Utc>,
-    membership_root: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
-struct PollResponse {
-    id: i64,
-    question: String,
-    options: Vec<String>,
-    commit_phase_end: DateTime<Utc>,
-    reveal_phase_end: DateTime<Utc>,
-    membership_root: String,
-    correct_option: Option<i16>,
-    resolved: bool,
-    phase: Phase,
-}
-
-#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
-struct CommitRequest {
-    commitment: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
-struct CommitResponse {
-    poll_id: i64,
-    commitment: String,
-    recorded_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
-struct ProveRequest {
-    choice: u8,
-    secret: String,
-    identity_secret: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
-struct RevealRequest {
-    proof: String,
-    public_inputs: Vec<String>,
-    commitment: String,
-    nullifier: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
-struct RevealResponse {
-    poll_id: i64,
-    nullifier: String,
-    recorded_at: DateTime<Utc>,
 }
 
 #[tokio::main]
