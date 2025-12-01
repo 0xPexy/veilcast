@@ -34,7 +34,7 @@ contract VeilCastPollsIntegrationTest is Test {
     {
         string[] memory cmds = new string[](6);
         cmds[0] = "node";
-        cmds[1] = string.concat(vm.projectRoot(), "/test/scripts/generate_proof.js");
+        cmds[1] = string.concat(vm.projectRoot(), "/script/zk/generate_proof.js");
         cmds[2] = vm.toString(pollId);
         cmds[3] = vm.toString(choice);
         cmds[4] = vm.toString(secret);

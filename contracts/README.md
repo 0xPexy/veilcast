@@ -1,66 +1,47 @@
-## Foundry
+# VeilCast Contracts
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+## Core tasks
+- Build: `forge build`
+- Test: `forge test` (FFI integration tests: `FOUNDRY_FFI=1 forge test --ffi`)
+- Format: `forge fmt`
 
-Foundry consists of:
+## ZK scripts (bb.js)
+- Install once: `cd contracts && npm install`
+- Proof generation: `npm run proof -- <pollId> <choice> <secret> <identitySecret>`  
+  (script: `script/zk/generate_proof.js`, uses `zk/target/veilcast.json`)
+- Verifier generation: `npm run verifier`  
+  (script: `script/zk/generate_verifier_contract.mjs` → `contracts/src/Verifier.sol`, keccak transcript)
 
-- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
-- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
-- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
-- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
-
-## Documentation
-
-https://book.getfoundry.sh/
-
-## Usage
-
-### Build
-
-```shell
-$ forge build
+## Deploy (Sepolia + Infura)
+`.env` (not committed):
+```
+RPC_URL=https://sepolia.infura.io/v3/<INFURA_PROJECT_ID>
+ETHERSCAN_API_KEY=<etherscan_key>  # optional (for verify)
 ```
 
-### Test
-
-```shell
-$ forge test
+1) Verifier deploy (if needed), using forge --account (configure via `forge account import`):
+```bash
+cd contracts
+make deploy-verifier NETWORK=sepolia SEPOLIA_RPC_URL=$RPC_URL ACCOUNT=<forge_account_name>
 ```
-
-### Format
-
-```shell
-$ forge fmt
+2) VeilCastPolls deploy:
+```bash
+cd contracts
+make deploy-polls VERIFIER=<verifier_address> NETWORK=sepolia SEPOLIA_RPC_URL=$RPC_URL ACCOUNT=<forge_account_name>
 ```
-
-### Gas Snapshots
-
-```shell
-$ forge snapshot
+3) Etherscan verify (optional):
+```bash
+forge verify-contract \
+  --chain 11155111 \
+  --etherscan-api-key $ETHERSCAN_API_KEY \
+  <DEPLOYED_ADDRESS> \
+  src/VeilCastPolls.sol:VeilCastPolls \
+  --constructor-args $(cast abi-encode "constructor(address)" $VERIFIER_ADDRESS) \
+  --compiler-version v0.8.20
 ```
+4) Update `infra/.env.backend` (`CONTRACT_ADDRESS`) and frontend `VITE_CONTRACT_ADDRESS` with the deployed address.
 
-### Anvil
-
-```shell
-$ anvil
-```
-
-### Deploy
-
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
-
-### Cast
-
-```shell
-$ cast <subcommand>
-```
-
-### Help
-
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
+## Useful
+- Anvil: `anvil`
+- Cast: `cast <subcommand>`
+- Foundry docs: https://book.getfoundry.sh/

@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "proof": "node scripts/generate_proof.js"
+    "proof": "node script/zk/generate_proof.js",
+    "verifier": "node script/zk/generate_verifier_contract.mjs"
   },
   "dependencies": {
     "@aztec/bb.js": "2.1.8",
