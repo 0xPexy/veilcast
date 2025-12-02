@@ -15,6 +15,8 @@ pub enum AppError {
     Db(#[from] sqlx::Error),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("external error: {0}")]
+    External(String),
 }
 
 #[derive(Debug, Serialize)]
@@ -28,7 +30,7 @@ impl IntoResponse for AppError {
             AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::Validation(_) => StatusCode::BAD_REQUEST,
             AppError::Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::Io(_) | AppError::External(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let body = axum::Json(ErrorBody {
             message: self.to_string(),

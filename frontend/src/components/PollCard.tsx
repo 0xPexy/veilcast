@@ -1,6 +1,7 @@
 import { ArrowUpRight, Clock3, Info, Trophy } from 'lucide-react';
 import { PollView } from '../lib/types';
 import { clsx } from 'clsx';
+import { Link } from 'react-router-dom';
 
 interface Props {
   poll: PollView;
@@ -14,9 +15,8 @@ export function PollCard({ poll }: Props) {
   };
 
   const bars = poll.options.map((opt, idx) => (
-    <div key={opt} className="flex items-center justify-between rounded-xl bg-white/5 px-3 py-2 text-sm">
-      <span className="text-white/80">{opt}</span>
-      <span className="text-white/60">Option {idx}</span>
+    <div key={`${opt}-${idx}`} className="rounded-xl bg-white/5 px-3 py-2 text-sm text-white/80">
+      {opt}
     </div>
   ));
 
@@ -44,7 +44,7 @@ export function PollCard({ poll }: Props) {
       <div className="flex flex-col gap-2">{bars}</div>
       <div className="mt-2 flex items-center gap-2 text-xs text-white/50">
         <Info size={14} />
-        <span>Membership root: {shorten(poll.membership_root)}</span>
+        <span>Membership snapshot: {shorten(poll.membership_root)}</span>
       </div>
       {poll.resolved && poll.correct_option != null && (
         <div className="flex items-center gap-2 rounded-lg bg-gradient-to-r from-poseidon/30 to-magenta/30 px-3 py-2 text-sm text-white">
@@ -53,12 +53,15 @@ export function PollCard({ poll }: Props) {
         </div>
       )}
       <div className="flex items-center justify-between pt-2">
-        <button className="rounded-full bg-gradient-to-r from-poseidon to-cyan px-4 py-2 text-sm font-semibold shadow-glow hover:opacity-90">
-          {poll.phase === 'commit' ? 'Commit vote' : poll.phase === 'reveal' ? 'Reveal vote' : 'View results'}
-        </button>
-        <button className="flex items-center gap-1 text-sm text-white/70 hover:text-white">
+        <Link
+          to={`/poll/${poll.id}`}
+          className="rounded-full bg-gradient-to-r from-poseidon to-cyan px-4 py-2 text-sm font-semibold shadow-glow hover:opacity-90"
+        >
+          {poll.phase === 'commit' ? 'View & commit' : poll.phase === 'reveal' ? 'View & reveal' : 'View results'}
+        </Link>
+        <Link className="flex items-center gap-1 text-sm text-white/70 hover:text-white" to={`/poll/${poll.id}`}>
           Details <ArrowUpRight size={14} />
-        </button>
+        </Link>
       </div>
     </div>
   );

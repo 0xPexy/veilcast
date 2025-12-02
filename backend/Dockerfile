@@ -18,3 +18,8 @@ COPY --from=builder /app/target/release/veilcast-backend /usr/local/bin/veilcast
 ENV RUST_LOG=info
 EXPOSE 8000
 CMD ["veilcast-backend"]
+
+# Dev image for cargo watch (used by docker compose dev profile)
+FROM rust:trixie AS dev
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates && rm -rf /var/lib/apt/lists/*

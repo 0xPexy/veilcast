@@ -17,6 +17,7 @@ services:
   backend:
     build:
       context: ../backend
+      target: builder
     container_name: veilcast-backend
     depends_on:
       - db
@@ -28,6 +29,26 @@ services:
       - ../backend:/app
     environment:
       - DATABASE_URL=${DATABASE_URL:-postgres://veilcast:veilcast@db:5432/veilcast}
+    command: /usr/local/bin/veilcast-backend
+
+  # Dev profile: hot-reload via cargo watch. Enable with COMPOSE_PROFILES=dev
+  backend-dev:
+    profiles: ["dev"]
+    build:
+      context: ../backend
+      target: dev
+    container_name: veilcast-backend-dev
+    depends_on:
+      - db
+    env_file:
+      - .env.backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../backend:/app
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgres://veilcast:veilcast@db:5432/veilcast}
+    command: sh -c "cargo install cargo-watch --locked || true && cargo watch -x run"
 
   frontend:
     build:

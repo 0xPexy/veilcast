@@ -2,7 +2,8 @@
 //! OpenAPI / Swagger documentation definitions.
 use crate::zk::ProofBundle;
 use crate::types::{
-    CommitRequest, CommitResponse, CreatePollRequest, PollResponse, ProveRequest, RevealRequest, RevealResponse,
+    CommitRequest, CommitResponse, CommitStatusResponse, CreatePollRequest, LoginRequest, LoginResponse, MeResponse,
+    MembershipStatusResponse, PollResponse, ProveRequest, RevealRequest, RevealResponse,
 };
 use utoipa::OpenApi;
 
@@ -15,7 +16,11 @@ use utoipa::OpenApi;
         get_poll_doc,
         record_commit_doc,
         generate_proof_doc,
-        reveal_vote_doc
+        reveal_vote_doc,
+        membership_status_doc,
+        commit_status_doc,
+        login_doc,
+        me_doc
     ),
     components(
         schemas(
@@ -23,10 +28,15 @@ use utoipa::OpenApi;
             PollResponse,
             CommitRequest,
             CommitResponse,
+            CommitStatusResponse,
             ProveRequest,
             RevealRequest,
             RevealResponse,
-            ProofBundle
+            ProofBundle,
+            LoginRequest,
+            LoginResponse,
+            MeResponse,
+            MembershipStatusResponse
         )
     ),
     tags(
@@ -94,3 +104,34 @@ pub async fn generate_proof_doc() {}
     responses((status = 200, body = RevealResponse))
 )]
 pub async fn reveal_vote_doc() {}
+
+#[utoipa::path(
+    get,
+    path = "/polls/{id}/membership",
+    params(("id" = i64, Path, description = "Poll id")),
+    responses((status = 200, body = MembershipStatusResponse))
+)]
+pub async fn membership_status_doc() {}
+
+#[utoipa::path(
+    get,
+    path = "/polls/{id}/commit_status",
+    params(("id" = i64, Path, description = "Poll id")),
+    responses((status = 200, body = CommitStatusResponse))
+)]
+pub async fn commit_status_doc() {}
+
+#[utoipa::path(
+    post,
+    path = "/auth/login",
+    request_body = LoginRequest,
+    responses((status = 200, body = LoginResponse))
+)]
+pub async fn login_doc() {}
+
+#[utoipa::path(
+    get,
+    path = "/auth/me",
+    responses((status = 200, body = MeResponse))
+)]
+pub async fn me_doc() {}

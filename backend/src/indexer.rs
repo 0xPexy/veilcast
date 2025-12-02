@@ -98,12 +98,17 @@ where
         let poll_id = ev.poll_id.as_u64() as i64;
         let commit_end = to_ts(ev.commit_phase_end)?;
         let reveal_end = to_ts(ev.reveal_phase_end)?;
+        let question_owned = ev.question.clone();
+        let options_owned = ev.options.clone();
+        let membership_owned = ev.membership_root.to_string();
+        let category_owned = "General".to_string();
         let np = NewPoll {
-            question: &ev.question,
-            options: &ev.options,
+            question: &question_owned,
+            options: &options_owned,
             commit_phase_end: commit_end,
             reveal_phase_end: reveal_end,
-            membership_root: &ev.membership_root.to_string(),
+            membership_root: &membership_owned,
+            category: &category_owned,
         };
         store.upsert_poll_from_chain(poll_id, np).await?;
         info!("Indexed PollCreated poll_id={}", poll_id);

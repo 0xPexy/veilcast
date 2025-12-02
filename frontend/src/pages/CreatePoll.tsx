@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
+import { createPoll } from '../lib/api';
 
 interface FormState {
   question: string;
@@ -8,19 +9,9 @@ interface FormState {
   optionB: string;
   commitMinutes: number;
   revealMinutes: number;
-  membershipRoot: string;
 }
 
-async function createPollApi(body: any) {
-  const base = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
-  const res = await fetch(`${base}/polls`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error('failed to create poll');
-  return res.json();
-}
+const pollCategories = ['General', 'Crypto', 'Macro', 'Sports', 'Governance', 'Culture'];
 
 export function CreatePollPage() {
   const [form, setForm] = useState<FormState>({
@@ -30,12 +21,9 @@ export function CreatePollPage() {
     optionB: '',
     commitMinutes: 60,
     revealMinutes: 180,
-    membershipRoot: '',
   });
 
-  const { mutateAsync, isPending, isSuccess, error } = useMutation({
-    mutationFn: createPollApi,
-  });
+  const { mutateAsync, isPending, isSuccess, error } = useMutation({ mutationFn: createPoll });
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -48,7 +36,7 @@ export function CreatePollPage() {
       options: [form.optionA, form.optionB],
       commit_phase_end: commitPhaseEnd,
       reveal_phase_end: revealPhaseEnd,
-      membership_root: form.membershipRoot || '0x0',
+      category: form.category,
     };
     await mutateAsync(payload);
   };
@@ -59,20 +47,36 @@ export function CreatePollPage() {
         <p className="text-sm uppercase tracking-wide text-cyan">Create</p>
         <h2 className="text-3xl font-semibold">Create a new poll</h2>
         <p className="text-white/60">
-          Owner-only in v1. Fill in question, options, timing, and membership root.
+          Owner-only in v1. Fill in question, options, and timing. Membership root is injected by the backend (latest allowlist).
         </p>
       </div>
 
       <form onSubmit={onSubmit} className="glass flex flex-col gap-4 p-6">
-        <label className="flex flex-col gap-2">
-          <span className="text-sm text-white/70">Question</span>
-          <input
-            value={form.question}
-            onChange={(e) => setForm({ ...form, question: e.target.value })}
-            className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 outline-none focus:border-cyan/60"
-            required
-          />
-        </label>
+        <div className="grid gap-4 md:grid-cols-2">
+          <label className="flex flex-col gap-2">
+            <span className="text-sm text-white/70">Question</span>
+            <input
+              value={form.question}
+              onChange={(e) => setForm({ ...form, question: e.target.value })}
+              className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 outline-none focus:border-cyan/60"
+              required
+            />
+          </label>
+          <label className="flex flex-col gap-2">
+            <span className="text-sm text-white/70">Category</span>
+            <select
+              value={form.category}
+              onChange={(e) => setForm({ ...form, category: e.target.value })}
+              className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white outline-none focus:border-cyan/60"
+            >
+              {pollCategories.map((cat) => (
+                <option key={cat} value={cat}>
+                  {cat}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
 
         <div className="grid gap-4 md:grid-cols-2">
           <label className="flex flex-col gap-2">
@@ -117,16 +121,6 @@ export function CreatePollPage() {
             />
           </label>
         </div>
-
-        <label className="flex flex-col gap-2">
-          <span className="text-sm text-white/70">Membership root (Merkle root)</span>
-          <input
-            value={form.membershipRoot}
-            onChange={(e) => setForm({ ...form, membershipRoot: e.target.value })}
-            placeholder="0x..."
-            className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 outline-none focus:border-cyan/60"
-          />
-        </label>
 
         <div className="flex items-center gap-3">
           <button

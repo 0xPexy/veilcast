@@ -31,9 +31,11 @@ sha2 = "0.10"
 ethers = { version = "2", default-features = false, features = [
     "abigen",
     "ws",
+    "rustls",
 ] }
 utoipa = { version = "4", features = ["chrono"] }
 utoipa-swagger-ui = { version = "7", features = ["axum"] }
+tower-http = { version = "0.5", features = ["cors"] }
 home = "=0.5.5"
 base64ct = "=1.7.2"
 hex = "0.4"

@@ -26,13 +26,18 @@ impl Phase {
     }
 }
 
+fn default_category() -> String {
+    "General".to_string()
+}
+
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreatePollRequest {
     pub question: String,
     pub options: Vec<String>,
     pub commit_phase_end: DateTime<Utc>,
     pub reveal_phase_end: DateTime<Utc>,
-    pub membership_root: String,
+    #[serde(default = "default_category")]
+    pub category: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
@@ -42,6 +47,7 @@ pub struct PollResponse {
     pub options: Vec<String>,
     pub commit_phase_end: DateTime<Utc>,
     pub reveal_phase_end: DateTime<Utc>,
+    pub category: String,
     pub membership_root: String,
     pub correct_option: Option<i16>,
     pub resolved: bool,
@@ -58,6 +64,13 @@ pub struct CommitResponse {
     pub poll_id: i64,
     pub commitment: String,
     pub recorded_at: DateTime<Utc>,
+    pub identity_secret: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CommitStatusResponse {
+    pub poll_id: i64,
+    pub already_committed: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
@@ -80,4 +93,30 @@ pub struct RevealResponse {
     pub poll_id: i64,
     pub nullifier: String,
     pub recorded_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MembershipStatusResponse {
+    pub poll_id: i64,
+    pub membership_root: String,
+    pub is_member: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct LoginRequest {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct LoginResponse {
+    pub token: String,
+    pub username: String,
+    pub identity_secret: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MeResponse {
+    pub username: String,
+    pub identity_secret: String,
 }

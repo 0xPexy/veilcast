@@ -9,10 +9,11 @@ import { CreatePollPage } from './pages/CreatePoll';
 import { LeaderboardPage } from './pages/Leaderboard';
 import { ProfilePage } from './pages/Profile';
 import { PollDetailPage } from './pages/PollDetail';
+import { LoginPage } from './pages/Login';
 
 const queryClient = new QueryClient();
-const chainId = Number(import.meta.env.CHAIN_ID ?? 11155111);
-const rpcUrl = import.meta.env.RPC_URL ?? 'https://rpc.sepolia.org';
+const chainId = Number(import.meta.env.VITE_CHAIN_ID ?? 11155111);
+const rpcUrl = import.meta.env.VITE_RPC_URL ?? 'https://rpc.sepolia.org';
 const chain = [mainnet, sepolia].find((c) => c.id === chainId) ?? sepolia;
 
 const wagmiConfig = createConfig({
@@ -35,6 +36,7 @@ export default function App() {
               <Route path="/create" element={<CreatePollPage />} />
               <Route path="/leaderboard" element={<LeaderboardPage />} />
               <Route path="/profile" element={<ProfilePage />} />
+              <Route path="/login" element={<LoginPage />} />
               <Route path="/poll/:id" element={<PollDetailPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>

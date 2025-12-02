@@ -35,17 +35,17 @@ export function HomePage() {
         </div>
 
         <div className="flex items-center gap-3 text-sm text-white/60">
-          <div className="rounded-full bg-white/5 px-3 py-1">Commit</div>
-          <div className="rounded-full bg-white/5 px-3 py-1">Reveal</div>
-          <div className="rounded-full bg-white/5 px-3 py-1">Resolved</div>
+          <div className="rounded-full bg-white/5 px-3 py-1">Commit window</div>
+          <div className="rounded-full bg-white/5 px-3 py-1">Reveal window</div>
+          <div className="rounded-full bg-white/5 px-3 py-1">Resolved (results only)</div>
         </div>
 
         {isLoading && <SkeletonGrid />}
         {isError && (
-          <div className="glass p-4 text-sm text-amber-300">
-            Failed to load polls. Showing local examples.
-            <button className="ml-3 text-cyan underline" onClick={() => refetch()}>
-              retry
+          <div className="glass flex items-center justify-between p-4 text-sm text-amber-300">
+            <span>Failed to load polls from the backend.</span>
+            <button className="text-cyan underline" onClick={() => refetch()}>
+              Retry
             </button>
           </div>
         )}

@@ -1,12 +1,11 @@
-import { useAccount, useConnect, useDisconnect } from 'wagmi';
-import { injected } from 'wagmi/connectors';
-import { Wallet } from 'lucide-react';
-import { Link, useLocation } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { clearToken, getToken } from '../lib/auth';
+import { me } from '../lib/api';
 
 export function Navbar() {
-  const { address, isConnected } = useAccount();
-  const { connect, connectors, isLoading, pendingConnector } = useConnect();
-  const { disconnect } = useDisconnect();
+  const [username, setUsername] = useState<string | null>(null);
+  const nav = useNavigate();
   const location = useLocation();
   const navLinks = [
     { href: '/', label: 'Home' },
@@ -15,9 +14,43 @@ export function Navbar() {
     { href: '/profile', label: 'Profile' },
   ];
 
-  const onConnect = () => {
-    const inj = connectors.find((c) => c.id === injected({}).id) ?? connectors[0];
-    if (inj) connect({ connector: inj });
+  useEffect(() => {
+    const refresh = () => {
+      const token = getToken();
+      if (!token) {
+        setUsername(null);
+        return;
+      }
+      me(token)
+        .then((res) => setUsername(res.username))
+        .catch(() => {
+          clearToken();
+          setUsername(null);
+        });
+    };
+
+    refresh();
+
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ username?: string | null }>).detail;
+      if (detail && Object.prototype.hasOwnProperty.call(detail, 'username')) {
+        setUsername(detail.username ?? null);
+      } else {
+        refresh();
+      }
+    };
+
+    window.addEventListener('veilcast-auth-changed', handler as EventListener);
+    return () => {
+      window.removeEventListener('veilcast-auth-changed', handler as EventListener);
+    };
+  }, []);
+
+  const onLogout = () => {
+    clearToken();
+    setUsername(null);
+    window.dispatchEvent(new CustomEvent('veilcast-auth-changed', { detail: { username: null } }));
+    nav('/login');
   };
 
   return (
@@ -50,25 +83,25 @@ export function Navbar() {
               </Link>
             ))}
           </nav>
-          {isConnected ? (
-            <button
-              onClick={() => disconnect()}
-              className="flex items-center gap-2 rounded-full bg-gradient-to-r from-poseidon to-magenta px-4 py-2 text-sm font-semibold shadow-glow"
-            >
-              <Wallet size={16} />
-              <span className="truncate max-w-[120px]">
-                {address?.slice(0, 6)}…{address?.slice(-4)}
-              </span>
-            </button>
+          {username ? (
+            <div className="flex items-center gap-3">
+              <div className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-white">
+                {username}
+              </div>
+              <button
+                onClick={onLogout}
+                className="rounded-full bg-gradient-to-r from-poseidon to-magenta px-4 py-2 text-sm font-semibold shadow-glow"
+              >
+                Logout
+              </button>
+            </div>
           ) : (
-            <button
-              onClick={onConnect}
-              disabled={isLoading}
-              className="flex items-center gap-2 rounded-full bg-gradient-to-r from-poseidon to-cyan px-4 py-2 text-sm font-semibold shadow-glow disabled:opacity-60"
+            <Link
+              to="/login"
+              className="rounded-full bg-gradient-to-r from-poseidon to-cyan px-4 py-2 text-sm font-semibold shadow-glow"
             >
-              <Wallet size={16} />
-              {isLoading ? `Connecting${pendingConnector ? '…' : ''}` : 'Connect wallet'}
-            </button>
+              Sign in
+            </Link>
           )}
         </div>
       </div>

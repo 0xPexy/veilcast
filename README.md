@@ -231,3 +231,4 @@ Stay tuned — the veil will lift soon. 👁‍🗨
   - Testnet deploy: `docker run --rm -it -v $(pwd)/contracts:/app -e RPC_URL=$RPC_URL -e PRIVATE_KEY=$PK veilcast-foundry forge script <script> --rpc-url $RPC_URL --private-key $PRIVATE_KEY --broadcast`
 - Hot reload: compose mounts `../backend` and `../frontend`, so code changes reflect inside containers.
 - Logs: `cd infra && docker compose logs -f backend` (or `frontend`).
+- Frontend auth: demo login is plain username/password (any values) → backend returns a bearer token. Use the “Login” page instead of wallet connect for now.
