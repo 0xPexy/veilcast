@@ -116,6 +116,39 @@ contract VeilCastPolls is Ownable {
         bytes calldata proof,
         bytes32[] calldata publicInputs
     ) external {
+        _revealSingle(pollId, choiceIndex, commitment, nullifier, proof, publicInputs);
+    }
+
+    /// @notice Reveal multiple votes in a single transaction. Each array must be the same length.
+    function batchReveal(
+        uint256 pollId,
+        uint8[] calldata choiceIndices,
+        uint256[] calldata commitments,
+        uint256[] calldata nullifiers,
+        bytes[] calldata proofs,
+        bytes32[][] calldata publicInputs
+    ) external {
+        uint256 len = choiceIndices.length;
+        require(
+            len == commitments.length
+                && len == nullifiers.length
+                && len == proofs.length
+                && len == publicInputs.length,
+            "length mismatch"
+        );
+        for (uint256 i = 0; i < len; i++) {
+            _revealSingle(pollId, choiceIndices[i], commitments[i], nullifiers[i], proofs[i], publicInputs[i]);
+        }
+    }
+
+    function _revealSingle(
+        uint256 pollId,
+        uint8 choiceIndex,
+        uint256 commitment,
+        uint256 nullifier,
+        bytes memory proof,
+        bytes32[] memory publicInputs
+    ) internal {
         Poll storage p = polls[pollId];
         if (!_pollExists(p)) revert InvalidPoll();
         if (block.timestamp < p.commitPhaseEnd || block.timestamp >= p.revealPhaseEnd) revert InvalidPhase();

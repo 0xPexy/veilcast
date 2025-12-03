@@ -2,11 +2,16 @@ use crate::error::{AppError, AppResult};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::{postgres::PgPoolOptions, Pool, Postgres, Row};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use tokio::process::Command;
 use tokio::sync::RwLock;
-use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+const MERKLE_SCRIPT: &str = "./scripts/poseidon_merkle.mjs";
+const MERKLE_DEPTH: u32 = 20;
 
 pub(crate) fn hash_members(members: &[String]) -> String {
     if members.is_empty() {
@@ -46,17 +51,25 @@ pub struct NewPoll<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct StoredCommit<'a> {
     pub poll_id: i64,
+    pub choice: i16,
     pub commitment: &'a str,
     pub identity_secret: &'a str,
+    pub nullifier: &'a str,
+    pub proof: &'a str,
+    pub public_inputs: &'a [String],
 }
 
 #[derive(Debug, Clone)]
 pub struct StoredCommitRecord {
     pub id: i64,
     pub poll_id: i64,
+    pub choice: i16,
     pub commitment: String,
     pub identity_secret: String,
     pub recorded_at: DateTime<Utc>,
+    pub nullifier: String,
+    pub proof: String,
+    pub public_inputs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -77,22 +90,56 @@ pub struct StoredVoteRecord {
 pub struct CommitSyncRow {
     pub id: i64,
     pub poll_id: i64,
+    pub choice: i16,
     pub commitment: String,
+    pub nullifier: String,
+    pub proof: String,
+    pub public_inputs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MerklePath {
+    pub bits: Vec<String>,
+    pub siblings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MerkleResult {
+    pub root: String,
+    pub paths: std::collections::HashMap<String, MerklePath>,
+    pub depth: u32,
 }
 
 #[async_trait]
 pub trait PollStore {
     async fn create_poll(&self, poll: NewPoll<'_>) -> AppResult<PollRecord>;
+    async fn create_poll_with_id(
+        &self,
+        poll_id: i64,
+        poll: NewPoll<'_>,
+        membership_root: String,
+        members: Vec<String>,
+    ) -> AppResult<PollRecord>;
     async fn list_polls(&self, limit: i64) -> AppResult<Vec<PollRecord>>;
     async fn get_poll(&self, poll_id: i64) -> AppResult<PollRecord>;
     async fn record_commit(&self, commit: StoredCommit<'_>) -> AppResult<StoredCommitRecord>;
     async fn record_vote(&self, vote: StoredVote<'_>) -> AppResult<StoredVoteRecord>;
     async fn membership_root_snapshot(&self) -> AppResult<String>;
+    async fn merkle_path_for_member(
+        &self,
+        poll_id: i64,
+        identity_secret: &str,
+    ) -> AppResult<Option<MerklePath>>;
+    async fn list_members(&self) -> AppResult<Vec<String>>;
     async fn ensure_member(&self, identity_secret: &str) -> AppResult<()>;
     async fn poll_includes_member(&self, poll_id: i64, identity_secret: &str) -> AppResult<bool>;
     async fn nullifier_used(&self, poll_id: i64, nullifier: &str) -> AppResult<bool>;
     async fn has_commit(&self, poll_id: i64, identity_secret: &str) -> AppResult<bool>;
-    async fn commits_to_sync(&self, now: DateTime<Utc>, limit: i64) -> AppResult<Vec<CommitSyncRow>>;
+    async fn commits_to_sync(
+        &self,
+        now: DateTime<Utc>,
+        limit: i64,
+    ) -> AppResult<Vec<CommitSyncRow>>;
     async fn mark_commit_synced(&self, commit_id: i64) -> AppResult<()>;
     async fn poll_has_pending_commits(&self, poll_id: i64) -> AppResult<bool>;
     async fn mark_poll_sync_complete(&self, poll_id: i64) -> AppResult<()>;
@@ -128,6 +175,57 @@ impl PgStore {
         Ok(Self { pool })
     }
 
+    async fn poll_member_list(&self, poll_id: i64) -> AppResult<Vec<String>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT identity_secret
+            FROM poll_members
+            WHERE poll_id = $1
+            ORDER BY identity_secret
+            "#,
+        )
+        .bind(poll_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AppError::Db)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| r.try_get::<String, _>("identity_secret").ok())
+            .collect())
+    }
+
+    async fn run_poseidon_merkle(&self, members: &[String]) -> AppResult<MerkleResult> {
+        // Write members to temp file
+        let tmp_path = std::env::temp_dir().join(format!("members-{}.json", Uuid::new_v4()));
+        let payload = serde_json::json!({
+            "members": members,
+            "depth": MERKLE_DEPTH,
+        });
+        tokio::fs::write(&tmp_path, payload.to_string())
+            .await
+            .map_err(AppError::Io)?;
+
+        let output = Command::new("node")
+            .arg(MERKLE_SCRIPT)
+            .arg(&tmp_path)
+            .output()
+            .await
+            .map_err(|e| AppError::External(e.to_string()))?;
+
+        // Clean up temp file
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(AppError::External(format!(
+                "poseidon merkle script failed: {stderr}"
+            )));
+        }
+        let res: MerkleResult = serde_json::from_slice(&output.stdout)
+            .map_err(|e| AppError::External(e.to_string()))?;
+        Ok(res)
+    }
+
     async fn current_members(&self) -> AppResult<Vec<String>> {
         let rows = sqlx::query(
             r#"
@@ -142,50 +240,101 @@ impl PgStore {
             .filter_map(|r| r.try_get::<String, _>("identity_secret").ok())
             .collect())
     }
+    async fn next_poll_sequence(&self) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar("SELECT nextval(pg_get_serial_sequence('polls','id'))")
+            .fetch_one(&self.pool)
+            .await
+    }
+
+    async fn insert_poll_with_members(
+        &self,
+        poll_id: i64,
+        poll: NewPoll<'_>,
+        membership_root: String,
+        members: Vec<String>,
+        adjust_sequence: bool,
+    ) -> AppResult<PollRecord> {
+        let mut tx = self.pool.begin().await.map_err(AppError::Db)?;
+        let rec = sqlx::query_as::<_, DbPoll>(
+            r#"
+            INSERT INTO polls (id, question, options, commit_phase_end, reveal_phase_end, category, membership_root, commit_sync_completed)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, false)
+            ON CONFLICT (id) DO UPDATE SET
+                question = EXCLUDED.question,
+                options = EXCLUDED.options,
+                commit_phase_end = EXCLUDED.commit_phase_end,
+                reveal_phase_end = EXCLUDED.reveal_phase_end,
+                category = EXCLUDED.category,
+                membership_root = EXCLUDED.membership_root
+            RETURNING id, question, options, commit_phase_end, reveal_phase_end, category, membership_root, correct_option, resolved, commit_sync_completed
+            "#,
+        )
+        .bind(poll_id)
+        .bind(poll.question)
+        .bind(serde_json::to_value(poll.options).unwrap())
+        .bind(poll.commit_phase_end)
+        .bind(poll.reveal_phase_end)
+        .bind(poll.category)
+        .bind(membership_root)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(AppError::Db)?;
+
+        for m in members {
+            sqlx::query(
+                r#"
+                INSERT INTO poll_members (poll_id, identity_secret)
+                VALUES ($1, $2)
+                ON CONFLICT DO NOTHING
+                "#,
+            )
+            .bind(poll_id)
+            .bind(m)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::Db)?;
+        }
+
+        if adjust_sequence {
+            sqlx::query(
+                r#"
+                SELECT setval(
+                    pg_get_serial_sequence('polls','id'),
+                    GREATEST($1, (SELECT COALESCE(MAX(id),0) + 1 FROM polls))
+                )
+                "#,
+            )
+            .bind(poll_id + 1)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(AppError::Db)?;
+        }
+
+        tx.commit().await.map_err(AppError::Db)?;
+        Ok(rec.into())
+    }
 }
 
 #[async_trait]
 impl PollStore for PgStore {
     async fn create_poll(&self, poll: NewPoll<'_>) -> AppResult<PollRecord> {
         let members = self.current_members().await?;
-        let computed_root = hash_members(&members);
-        let rec = sqlx::query_as::<_, DbPoll>(
-            r#"
-            INSERT INTO polls (question, options, commit_phase_end, reveal_phase_end, membership_root, category, commit_sync_completed)
-            VALUES ($1, $2, $3, $4, $5, $6, false)
-            RETURNING id, question, options, commit_phase_end, reveal_phase_end, category, membership_root, correct_option, resolved, commit_sync_completed
-            "#,
-        )
-        .bind(poll.question)
-        .bind(serde_json::to_value(poll.options).unwrap())
-        .bind(poll.commit_phase_end)
-        .bind(poll.reveal_phase_end)
-        .bind(computed_root.clone())
-        .bind(poll.category)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(AppError::Db)?;
+        let merkle = self.run_poseidon_merkle(&members).await?;
+        let computed_root = merkle.root;
+        let poll_id = self.next_poll_sequence().await.map_err(AppError::Db)?;
+        self.insert_poll_with_members(poll_id, poll, computed_root, members, false)
+            .await
+    }
 
-        if !members.is_empty() {
-            let mut tx = self.pool.begin().await.map_err(AppError::Db)?;
-            for m in members {
-                sqlx::query(
-                    r#"
-                    INSERT INTO poll_members (poll_id, identity_secret)
-                    VALUES ($1, $2)
-                    ON CONFLICT DO NOTHING
-                    "#,
-                )
-                .bind(rec.id)
-                .bind(m)
-                .execute(&mut *tx)
-                .await
-                .map_err(AppError::Db)?;
-            }
-            tx.commit().await.map_err(AppError::Db)?;
-        }
-
-        Ok(rec.into())
+    async fn create_poll_with_id(
+        &self,
+        poll_id: i64,
+        poll: NewPoll<'_>,
+        membership_root: String,
+        members: Vec<String>,
+    ) -> AppResult<PollRecord> {
+        self.insert_poll_with_members(poll_id, poll, membership_root, members, true)
+            .await
     }
 
     async fn list_polls(&self, limit: i64) -> AppResult<Vec<PollRecord>> {
@@ -226,14 +375,18 @@ impl PollStore for PgStore {
     async fn record_commit(&self, commit: StoredCommit<'_>) -> AppResult<StoredCommitRecord> {
         let rec = sqlx::query_as::<_, DbCommit>(
             r#"
-            INSERT INTO commitments (poll_id, commitment, identity_secret)
-            VALUES ($1, $2, $3)
-            RETURNING id, poll_id, commitment, identity_secret, recorded_at
+            INSERT INTO commitments (poll_id, choice, commitment, identity_secret, nullifier, proof, public_inputs)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING id, poll_id, choice, commitment, identity_secret, nullifier, proof, public_inputs, recorded_at
             "#,
         )
         .bind(commit.poll_id)
+        .bind(commit.choice)
         .bind(commit.commitment)
         .bind(commit.identity_secret)
+        .bind(commit.nullifier)
+        .bind(commit.proof)
+        .bind(commit.public_inputs)
         .fetch_one(&self.pool)
         .await
         .map_err(AppError::Db)?;
@@ -262,7 +415,30 @@ impl PollStore for PgStore {
 
     async fn membership_root_snapshot(&self) -> AppResult<String> {
         let members = self.current_members().await?;
-        Ok(hash_members(&members))
+        let merkle = self.run_poseidon_merkle(&members).await?;
+        Ok(merkle.root)
+    }
+
+    async fn list_members(&self) -> AppResult<Vec<String>> {
+        self.current_members().await
+    }
+
+    async fn merkle_path_for_member(
+        &self,
+        poll_id: i64,
+        identity_secret: &str,
+    ) -> AppResult<Option<MerklePath>> {
+        let members = self
+            .poll_member_list(poll_id)
+            .await?;
+        if members.is_empty() {
+            return Ok(None);
+        }
+        if !members.iter().any(|m| m == identity_secret) {
+            return Ok(None);
+        }
+        let merkle = self.run_poseidon_merkle(&members).await?;
+        Ok(merkle.paths.get(identity_secret).cloned())
     }
 
     async fn ensure_member(&self, identity_secret: &str) -> AppResult<()> {
@@ -322,13 +498,18 @@ impl PollStore for PgStore {
         Ok(row.is_some())
     }
 
-    async fn commits_to_sync(&self, now: DateTime<Utc>, limit: i64) -> AppResult<Vec<CommitSyncRow>> {
+    async fn commits_to_sync(
+        &self,
+        now: DateTime<Utc>,
+        limit: i64,
+    ) -> AppResult<Vec<CommitSyncRow>> {
         let rows = sqlx::query_as::<_, CommitSyncRow>(
             r#"
-            SELECT c.id::BIGINT as id, c.poll_id, c.commitment
+            SELECT c.id::BIGINT as id, c.poll_id, c.choice, c.commitment, c.nullifier, c.proof, c.public_inputs
             FROM commitments c
             JOIN polls p ON p.id = c.poll_id
-            WHERE p.commit_phase_end > $1
+            WHERE p.commit_phase_end <= $1
+              AND p.reveal_phase_end > $1
               AND p.commit_sync_completed = false
               AND c.onchain_submitted = false
             ORDER BY c.id
@@ -508,9 +689,13 @@ impl From<DbPoll> for PollRecord {
 struct DbCommit {
     id: i32,
     poll_id: i64,
+    choice: i16,
     commitment: String,
     recorded_at: DateTime<Utc>,
     identity_secret: String,
+    nullifier: String,
+    proof: String,
+    public_inputs: Vec<String>,
 }
 
 impl From<DbCommit> for StoredCommitRecord {
@@ -518,9 +703,13 @@ impl From<DbCommit> for StoredCommitRecord {
         StoredCommitRecord {
             id: value.id as i64,
             poll_id: value.poll_id,
+            choice: value.choice,
             commitment: value.commitment,
             recorded_at: value.recorded_at,
             identity_secret: value.identity_secret,
+            nullifier: value.nullifier,
+            proof: value.proof,
+            public_inputs: value.public_inputs,
         }
     }
 }
@@ -586,24 +775,34 @@ impl InMemoryStore {
 #[async_trait]
 impl PollStore for InMemoryStore {
     async fn create_poll(&self, poll: NewPoll<'_>) -> AppResult<PollRecord> {
-        let mut polls = self.polls.write().await;
-        let id = polls.len() as i64;
         let members = self.members.read().await.clone();
         let root = hash_members(&members);
+        let id = self.polls.read().await.len() as i64;
+        self.create_poll_with_id(id, poll, root, members).await
+    }
+
+    async fn create_poll_with_id(
+        &self,
+        poll_id: i64,
+        poll: NewPoll<'_>,
+        membership_root: String,
+        members: Vec<String>,
+    ) -> AppResult<PollRecord> {
+        let mut polls = self.polls.write().await;
         let record = PollRecord {
-            id,
+            id: poll_id,
             question: poll.question.to_string(),
             options: poll.options.to_vec(),
             commit_phase_end: poll.commit_phase_end,
             reveal_phase_end: poll.reveal_phase_end,
             category: poll.category.to_string(),
-            membership_root: root.clone(),
+            membership_root: membership_root.clone(),
             correct_option: None,
             resolved: false,
             commit_sync_completed: false,
         };
-        polls.insert(id, record.clone());
-        self.poll_members.write().await.insert(id, members);
+        polls.insert(poll_id, record.clone());
+        self.poll_members.write().await.insert(poll_id, members);
         Ok(record)
     }
 
@@ -627,7 +826,9 @@ impl PollStore for InMemoryStore {
                 .iter()
                 .any(|c| c.poll_id == commit.poll_id && c.identity_secret == commit.identity_secret)
             {
-                return Err(AppError::Validation("already committed for this poll".into()));
+                return Err(AppError::Validation(
+                    "already committed for this poll".into(),
+                ));
             }
         }
         let mut seq = self.commit_seq.write().await;
@@ -636,9 +837,13 @@ impl PollStore for InMemoryStore {
         let rec = StoredCommitRecord {
             id,
             poll_id: commit.poll_id,
+            choice: commit.choice,
             commitment: commit.commitment.to_string(),
             identity_secret: commit.identity_secret.to_string(),
             recorded_at: Utc::now(),
+            nullifier: commit.nullifier.to_string(),
+            proof: commit.proof.to_string(),
+            public_inputs: commit.public_inputs.to_vec(),
         };
         self.commits.write().await.push(rec.clone());
         self.commits_by_identity
@@ -673,6 +878,18 @@ impl PollStore for InMemoryStore {
         Ok(hash_members(&members))
     }
 
+    async fn list_members(&self) -> AppResult<Vec<String>> {
+        Ok(self.members.read().await.clone())
+    }
+
+    async fn merkle_path_for_member(
+        &self,
+        _poll_id: i64,
+        _identity_secret: &str,
+    ) -> AppResult<Option<MerklePath>> {
+        Ok(None)
+    }
+
     async fn ensure_member(&self, identity_secret: &str) -> AppResult<()> {
         let mut members = self.members.write().await;
         if !members.contains(&identity_secret.to_string()) {
@@ -700,7 +917,11 @@ impl PollStore for InMemoryStore {
         Ok(seen.contains_key(&(poll_id, identity_secret.to_string())))
     }
 
-    async fn commits_to_sync(&self, now: DateTime<Utc>, limit: i64) -> AppResult<Vec<CommitSyncRow>> {
+    async fn commits_to_sync(
+        &self,
+        now: DateTime<Utc>,
+        limit: i64,
+    ) -> AppResult<Vec<CommitSyncRow>> {
         let polls = self.polls.read().await;
         let commits = self.commits.read().await;
         let synced = self.synced_commits.read().await;
@@ -713,11 +934,15 @@ impl PollStore for InMemoryStore {
                 continue;
             }
             if let Some(poll) = polls.get(&commit.poll_id) {
-                if poll.commit_phase_end <= now {
+                if poll.commit_phase_end <= now && poll.reveal_phase_end > now {
                     items.push(CommitSyncRow {
                         id: commit.id,
                         poll_id: commit.poll_id,
+                        choice: commit.choice,
                         commitment: commit.commitment.clone(),
+                        nullifier: commit.nullifier.clone(),
+                        proof: commit.proof.clone(),
+                        public_inputs: commit.public_inputs.clone(),
                     });
                 }
             }
@@ -733,7 +958,9 @@ impl PollStore for InMemoryStore {
     async fn poll_has_pending_commits(&self, poll_id: i64) -> AppResult<bool> {
         let commits = self.commits.read().await;
         let synced = self.synced_commits.read().await;
-        let pending = commits.iter().any(|c| c.poll_id == poll_id && !synced.contains(&c.id));
+        let pending = commits
+            .iter()
+            .any(|c| c.poll_id == poll_id && !synced.contains(&c.id));
         Ok(pending)
     }
 
@@ -917,6 +1144,10 @@ async fn init_schema(pool: &Pool<Postgres>) -> AppResult<()> {
             poll_id BIGINT NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
             commitment TEXT NOT NULL,
             identity_secret TEXT NOT NULL,
+            choice SMALLINT NOT NULL DEFAULT 0,
+            nullifier TEXT NOT NULL DEFAULT '',
+            proof TEXT NOT NULL DEFAULT '',
+            public_inputs TEXT[] NOT NULL DEFAULT '{}',
             recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
             onchain_submitted BOOLEAN NOT NULL DEFAULT false
         )
@@ -947,6 +1178,46 @@ async fn init_schema(pool: &Pool<Postgres>) -> AppResult<()> {
         r#"
         ALTER TABLE commitments
         ADD COLUMN IF NOT EXISTS onchain_submitted BOOLEAN NOT NULL DEFAULT false;
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    sqlx::query(
+        r#"
+        ALTER TABLE commitments
+        ADD COLUMN IF NOT EXISTS choice SMALLINT NOT NULL DEFAULT 0;
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    sqlx::query(
+        r#"
+        ALTER TABLE commitments
+        ADD COLUMN IF NOT EXISTS nullifier TEXT NOT NULL DEFAULT '';
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    sqlx::query(
+        r#"
+        ALTER TABLE commitments
+        ADD COLUMN IF NOT EXISTS proof TEXT NOT NULL DEFAULT '';
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    sqlx::query(
+        r#"
+        ALTER TABLE commitments
+        ADD COLUMN IF NOT EXISTS public_inputs TEXT[] NOT NULL DEFAULT '{}';
         "#,
     )
     .execute(pool)

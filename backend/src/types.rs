@@ -41,6 +41,12 @@ pub struct CreatePollRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CreatePollResponse {
+    pub poll: PollResponse,
+    pub tx_hash: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PollResponse {
     pub id: i64,
     pub question: String,
@@ -56,7 +62,11 @@ pub struct PollResponse {
 
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CommitRequest {
+    pub choice: u8,
     pub commitment: String,
+    pub nullifier: String,
+    pub proof: String,
+    pub public_inputs: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
@@ -65,6 +75,10 @@ pub struct CommitResponse {
     pub commitment: String,
     pub recorded_at: DateTime<Utc>,
     pub identity_secret: String,
+    pub nullifier: String,
+    pub proof: String,
+    pub public_inputs: Vec<String>,
+    pub choice: i16,
 }
 
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
@@ -100,6 +114,8 @@ pub struct MembershipStatusResponse {
     pub poll_id: i64,
     pub membership_root: String,
     pub is_member: bool,
+    pub path_bits: Option<Vec<String>>,
+    pub path_siblings: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]

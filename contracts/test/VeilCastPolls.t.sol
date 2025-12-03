@@ -88,6 +88,53 @@ contract VeilCastPollsTest is Test {
         polls.reveal(pollId, 2, commitment, nullifier, proof, pubInputs);
     }
 
+    function testBatchRevealHappyPath() external {
+        (uint256 pollId,, uint256 revealEnd) = _createPoll();
+        uint256[] memory commitments = new uint256[](2);
+        uint256[] memory nullifiers = new uint256[](2);
+        uint8[] memory choices = new uint8[](2);
+        bytes[] memory proofs = new bytes[](2);
+        bytes32[][] memory pubInputs = new bytes32[][](2);
+
+        commitments[0] = 111;
+        commitments[1] = 222;
+        nullifiers[0] = 333;
+        nullifiers[1] = 444;
+        choices[0] = 0;
+        choices[1] = 1;
+
+        (proofs[0], pubInputs[0]) = _mockProof(commitments[0], nullifiers[0], pollId, 1234);
+        (proofs[1], pubInputs[1]) = _mockProof(commitments[1], nullifiers[1], pollId, 1234);
+
+        vm.warp(revealEnd - 10);
+        polls.batchReveal(pollId, choices, commitments, nullifiers, proofs, pubInputs);
+
+        uint256[] memory counts = polls.getVotes(pollId);
+        assertEq(counts[0], 1);
+        assertEq(counts[1], 1);
+        assertTrue(polls.nullifierUsed(pollId, nullifiers[0]));
+        assertTrue(polls.nullifierUsed(pollId, nullifiers[1]));
+    }
+
+    function testBatchRevealLengthMismatch() external {
+        (uint256 pollId,, uint256 revealEnd) = _createPoll();
+        uint8[] memory choices = new uint8[](1);
+        uint256[] memory commitments = new uint256[](2);
+        uint256[] memory nullifiers = new uint256[](1);
+        bytes[] memory proofs = new bytes[](1);
+        bytes32[][] memory pubInputs = new bytes32[][](1);
+
+        commitments[0] = 111;
+        nullifiers[0] = 222;
+        choices[0] = 0;
+        (proofs[0], pubInputs[0]) = _mockProof(commitments[0], nullifiers[0], pollId, 1234);
+        commitments[1] = 333;
+
+        vm.warp(revealEnd - 5);
+        vm.expectRevert(bytes("length mismatch"));
+        polls.batchReveal(pollId, choices, commitments, nullifiers, proofs, pubInputs);
+    }
+
     function testRevealWrongPhaseReverts() external {
         (uint256 pollId,, uint256 revealEnd) = _createPoll();
         uint256 commitment = 111;

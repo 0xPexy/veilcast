@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import { createPoll } from '../lib/api';
 
 interface FormState {
@@ -14,6 +15,7 @@ interface FormState {
 const pollCategories = ['General', 'Crypto', 'Macro', 'Sports', 'Governance', 'Culture'];
 
 export function CreatePollPage() {
+  const navigate = useNavigate();
   const [form, setForm] = useState<FormState>({
     question: '',
     category: 'General',
@@ -22,6 +24,9 @@ export function CreatePollPage() {
     commitMinutes: 60,
     revealMinutes: 180,
   });
+  const [txLink, setTxLink] = useState<string | null>(null);
+  const [lastPollId, setLastPollId] = useState<number | null>(null);
+  const ETHERSCAN_BASE = import.meta.env.VITE_ETHERSCAN_BASE || 'https://sepolia.etherscan.io';
 
   const { mutateAsync, isPending, isSuccess, error } = useMutation({ mutationFn: createPoll });
 
@@ -38,7 +43,14 @@ export function CreatePollPage() {
       reveal_phase_end: revealPhaseEnd,
       category: form.category,
     };
-    await mutateAsync(payload);
+    setTxLink(null);
+    const result = await mutateAsync(payload);
+    setLastPollId(result.poll.id);
+    if (result.tx_hash) {
+      const href = `${ETHERSCAN_BASE}/tx/${result.tx_hash}`;
+      setTxLink(href);
+      window.open(href, '_blank');
+    }
   };
 
   return (
@@ -130,7 +142,30 @@ export function CreatePollPage() {
           >
             {isPending ? 'Creating…' : 'Create poll'}
           </button>
-          {isSuccess && <span className="text-sm text-cyan">Poll created!</span>}
+          {isSuccess && (
+            <span className="flex items-center gap-3 text-sm text-cyan">
+              {lastPollId !== null ? `Poll #${lastPollId} created!` : 'Poll created!'}
+              {txLink && (
+                <a
+                  className="underline decoration-dotted hover:text-white"
+                  href={txLink}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  View tx
+                </a>
+              )}
+              {lastPollId !== null && (
+                <button
+                  type="button"
+                  onClick={() => navigate(`/poll/${lastPollId}`)}
+                  className="rounded-full border border-cyan/60 px-3 py-1 text-xs font-semibold text-cyan hover:text-white hover:border-white/70"
+                >
+                  View poll
+                </button>
+              )}
+            </span>
+          )}
           {error && <span className="text-sm text-amber-300">Failed: {(error as Error).message}</span>}
         </div>
       </form>

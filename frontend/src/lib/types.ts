@@ -17,13 +17,27 @@ export interface PollView extends Poll {
   countdown: string;
 }
 
+export interface CreatePollResult {
+  poll: Poll;
+  tx_hash: string;
+}
+
 export interface MembershipStatus {
   poll_id: number;
   membership_root: string;
   is_member: boolean;
+  path_bits?: string[];
+  path_siblings?: string[];
 }
 
 export interface CommitStatus {
   poll_id: number;
   already_committed: boolean;
+}
+
+export interface GeneratedProof {
+  commitment: string;
+  nullifier: string;
+  proof: string;
+  public_inputs: string[];
 }

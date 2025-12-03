@@ -7,13 +7,16 @@ mod zk;
 
 use crate::doc::ApiDoc;
 use crate::error::{AppError, AppResult};
-use crate::indexer::{spawn_indexer, IndexerConfig};
+use crate::indexer::{spawn_indexer, IndexerConfig, PollCreatedEvent};
 #[cfg(test)]
 use crate::repo::InMemoryStore;
-use crate::repo::{NewPoll, PgStore, PollRecord, PollStore, StoredCommit, StoredVote};
+use crate::repo::{
+    CommitSyncRow, MerklePath, NewPoll, PgStore, PollRecord, PollStore, StoredCommit, StoredVote,
+};
 use crate::types::{
-    CommitRequest, CommitResponse, CommitStatusResponse, CreatePollRequest, LoginRequest, LoginResponse, MeResponse,
-    MembershipStatusResponse, Phase, PollResponse, ProveRequest, RevealRequest, RevealResponse,
+    CommitRequest, CommitResponse, CommitStatusResponse, CreatePollRequest, CreatePollResponse,
+    LoginRequest, LoginResponse, MeResponse, MembershipStatusResponse, Phase, PollResponse,
+    ProveRequest, RevealRequest, RevealResponse,
 };
 use crate::zk::{NoopZkBackend, ProofBundle, ProofRequest, ZkBackend};
 use async_trait::async_trait;
@@ -23,63 +26,68 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
-use ethers::contract::abigen;
-use ethers::core::types::{H160, H256, U256};
+use ethers::contract::{abigen, EthLogDecode};
+use ethers::core::types::{Bytes, H160, H256, U256};
 use ethers::middleware::SignerMiddleware;
-use ethers::providers::{Middleware, Provider, Ws};
+use ethers::providers::{Http, Middleware, Provider};
 use ethers::signers::{LocalWallet, Signer};
 use hex;
+use once_cell::sync::OnceCell;
+use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
+use tokio::time::Duration;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
-use tokio::time::Duration;
-use sha2::{Digest, Sha256};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
-use once_cell::sync::OnceCell;
 
 static IDENTITY_SALT: OnceCell<String> = OnceCell::new();
 
 abigen!(
-    VeilCastCommitContract,
+    VeilCastContract,
     r#"[
         function commit(uint256 pollId, bytes32 commitment)
+        function createPoll(string question, string[] options, uint256 commitPhaseEnd, uint256 revealPhaseEnd, uint256 membershipRoot)
+        function batchReveal(uint256 pollId, uint8[] choiceIndices, uint256[] commitments, uint256[] nullifiers, bytes[] proofs, bytes32[][] publicInputs)
     ]"#
 );
 
 #[async_trait]
-pub trait OnchainCommitter: Send + Sync {
-    async fn submit_commit(&self, poll_id: i64, commitment: &str) -> AppResult<()>;
+pub trait OnchainRevealer: Send + Sync {
+    async fn submit_batch_reveal(&self, poll_id: i64, items: &[CommitSyncRow]) -> AppResult<()>;
 }
 
 #[derive(Clone, Default)]
-pub struct NoopCommitter;
+pub struct NoopRevealer;
 
 #[async_trait]
-impl OnchainCommitter for NoopCommitter {
-    async fn submit_commit(&self, poll_id: i64, commitment: &str) -> AppResult<()> {
+impl OnchainRevealer for NoopRevealer {
+    async fn submit_batch_reveal(&self, poll_id: i64, items: &[CommitSyncRow]) -> AppResult<()> {
         info!(
             poll_id,
-            commitment,
-            "Simulating on-chain submission of commitment"
+            count = items.len(),
+            "Simulating on-chain batch reveal"
         );
         Ok(())
     }
 }
 
 #[derive(Clone)]
-pub struct EthersCommitter {
-    contract: VeilCastCommitContract<SignerMiddleware<Provider<Ws>, LocalWallet>>,
+pub struct PollsContractClient {
+    contract: VeilCastContract<SignerMiddleware<Provider<Http>, LocalWallet>>,
 }
 
-impl EthersCommitter {
-    pub async fn new(ws_url: &str, private_key: &str, contract_address: H160) -> AppResult<Self> {
-        let ws = Ws::connect(ws_url)
-            .await
-            .map_err(|e| AppError::External(format!("ws connect error: {e}")))?;
-        let provider = Provider::new(ws);
+pub struct CreatePollTxResult {
+    pub poll_id: i64,
+    pub tx_hash: H256,
+}
+
+impl PollsContractClient {
+    pub async fn new(rpc_url: &str, private_key: &str, contract_address: H160) -> AppResult<Self> {
+        let provider = Provider::<Http>::try_from(rpc_url)
+            .map_err(|e| AppError::External(format!("rpc provider error: {e}")))?;
 
         let chain_id = provider
             .get_chainid()
@@ -93,88 +101,191 @@ impl EthersCommitter {
 
         let client = SignerMiddleware::new(provider, wallet);
         let client = Arc::new(client);
-        let contract = VeilCastCommitContract::new(contract_address, client);
+        let contract = VeilCastContract::new(contract_address, client);
         Ok(Self { contract })
+    }
+
+    pub async fn create_poll_onchain(
+        &self,
+        question: &str,
+        options: &[String],
+        commit_phase_end: chrono::DateTime<Utc>,
+        reveal_phase_end: chrono::DateTime<Utc>,
+        membership_root: &str,
+    ) -> AppResult<CreatePollTxResult> {
+        let commit_u256 = to_unix_u256(commit_phase_end)?;
+        let reveal_u256 = to_unix_u256(reveal_phase_end)?;
+        let membership_u256 = parse_u256_hex(membership_root)?;
+
+        let call = self.contract.create_poll(
+            question.to_string(),
+            options.to_vec(),
+            commit_u256,
+            reveal_u256,
+            membership_u256,
+        );
+        let pending = call
+            .send()
+            .await
+            .map_err(|e| AppError::External(format!("send createPoll tx failed: {e}")))?;
+        let receipt = pending
+            .await
+            .map_err(|e| AppError::External(format!("createPoll pending failed: {e}")))?
+            .ok_or_else(|| AppError::External("createPoll tx dropped".into()))?;
+
+        let poll_id = receipt
+            .logs
+            .iter()
+            .find_map(|log| PollCreatedEvent::decode_log(&log.clone().into()).ok())
+            .map(|ev| ev.poll_id.as_u64() as i64)
+            .ok_or_else(|| AppError::External("PollCreated event not found".into()))?;
+
+        Ok(CreatePollTxResult {
+            poll_id,
+            tx_hash: receipt.transaction_hash,
+        })
     }
 }
 
-fn parse_commitment_hex(value: &str) -> AppResult<H256> {
+fn parse_h256_hex(value: &str) -> AppResult<H256> {
     let hex_str = value.strip_prefix("0x").unwrap_or(value);
     let bytes = hex::decode(hex_str)
-        .map_err(|e| AppError::Validation(format!("invalid commitment hex: {e}")))?;
-    if bytes.len() > 32 {
-        return Err(AppError::Validation("commitment too long".into()));
+        .map_err(|e| AppError::Validation(format!("invalid bytes32 hex: {e}")))?;
+    if bytes.len() != 32 {
+        return Err(AppError::Validation("bytes32 must be 32 bytes".into()));
     }
     let mut buf = [0u8; 32];
-    buf[32 - bytes.len()..].copy_from_slice(&bytes);
-    Ok(H256::from(buf))
+    buf.copy_from_slice(&bytes);
+    Ok(H256(buf))
+}
+
+fn parse_u256_hex(value: &str) -> AppResult<U256> {
+    let hex_str = value.strip_prefix("0x").unwrap_or(value);
+    if hex_str.is_empty() {
+        return Ok(U256::zero());
+    }
+    U256::from_str_radix(hex_str, 16).map_err(|e| AppError::Validation(format!("invalid hex: {e}")))
+}
+
+fn to_unix_u256(ts: chrono::DateTime<Utc>) -> AppResult<U256> {
+    let seconds = ts.timestamp();
+    if seconds < 0 {
+        return Err(AppError::Validation(
+            "timestamp must be non-negative".into(),
+        ));
+    }
+    Ok(U256::from(seconds as u64))
 }
 
 #[async_trait]
-impl OnchainCommitter for EthersCommitter {
-    async fn submit_commit(&self, poll_id: i64, commitment: &str) -> AppResult<()> {
-        let commitment_h256 = parse_commitment_hex(commitment)?;
+impl OnchainRevealer for PollsContractClient {
+    async fn submit_batch_reveal(&self, poll_id: i64, items: &[CommitSyncRow]) -> AppResult<()> {
         let poll_u256 = if poll_id < 0 {
             return Err(AppError::Validation("invalid poll id".into()));
         } else {
             U256::from(poll_id as u64)
         };
-        let call = self.contract.clone().commit(poll_u256, commitment_h256.into());
+        let mut choices: Vec<u8> = Vec::with_capacity(items.len());
+        let mut commitments: Vec<U256> = Vec::with_capacity(items.len());
+        let mut nullifiers: Vec<U256> = Vec::with_capacity(items.len());
+        let mut proofs: Vec<Bytes> = Vec::with_capacity(items.len());
+        let mut publics: Vec<Vec<[u8; 32]>> = Vec::with_capacity(items.len());
+
+        for it in items {
+            choices.push(it.choice as u8);
+            commitments.push(parse_u256_hex(&it.commitment)?);
+            nullifiers.push(parse_u256_hex(&it.nullifier)?);
+            let proof_bytes = hex::decode(it.proof.trim_start_matches("0x"))
+                .map_err(|e| AppError::Validation(format!("invalid proof hex: {e}")))?;
+            proofs.push(Bytes::from(proof_bytes));
+            let mut arr: Vec<[u8; 32]> = Vec::with_capacity(it.public_inputs.len());
+            for p in &it.public_inputs {
+                let h = parse_h256_hex(p)?;
+                arr.push(h.0);
+            }
+            publics.push(arr);
+        }
+
+        let call = self.contract.clone().batch_reveal(
+            poll_u256,
+            choices,
+            commitments,
+            nullifiers,
+            proofs,
+            publics,
+        );
         let pending = call
             .send()
             .await
-            .map_err(|e| AppError::External(format!("send commit tx failed: {e}")))?;
+            .map_err(|e| AppError::External(format!("send batchReveal failed: {e}")))?;
         pending
             .await
-            .map_err(|e| AppError::External(format!("commit tx pending failed: {e}")))?;
+            .map_err(|e| AppError::External(format!("batchReveal pending failed: {e}")))?;
         Ok(())
     }
 }
 
-async fn sync_commits_once<S>(
+const REVEAL_BATCH_SIZE: usize = 20;
+
+async fn sync_reveals_once<S>(
     store: Arc<S>,
-    committer: Arc<dyn OnchainCommitter + Send + Sync>,
+    revealer: Arc<dyn OnchainRevealer + Send + Sync>,
 ) -> AppResult<()>
 where
     S: PollStore + Send + Sync + 'static,
 {
-    let pending = store.commits_to_sync(Utc::now(), 50).await?;
-    info!(pending = pending.len(), "commit sync tick");
+    let pending = store.commits_to_sync(Utc::now(), 200).await?;
+    info!(pending = pending.len(), "reveal sync tick");
+
+    // group by poll_id
+    let mut by_poll: std::collections::HashMap<i64, Vec<CommitSyncRow>> =
+        std::collections::HashMap::new();
     for item in pending {
-        if let Err(err) = committer.submit_commit(item.poll_id, &item.commitment).await {
-            error!(poll_id = item.poll_id, ?err, "Failed to submit commitment");
-            continue;
+        by_poll.entry(item.poll_id).or_default().push(item);
+    }
+
+    for (poll_id, mut items) in by_poll {
+        // chunk by batch size
+        while !items.is_empty() {
+            let chunk: Vec<CommitSyncRow> =
+                items.drain(0..items.len().min(REVEAL_BATCH_SIZE)).collect();
+            if let Err(err) = revealer.submit_batch_reveal(poll_id, &chunk).await {
+                error!(poll_id, ?err, "Failed to submit batch reveal");
+                break;
+            }
+            for it in &chunk {
+                store.mark_commit_synced(it.id).await?;
+            }
         }
-        store.mark_commit_synced(item.id).await?;
-        if !store.poll_has_pending_commits(item.poll_id).await? {
-            store.mark_poll_sync_complete(item.poll_id).await?;
+        if !store.poll_has_pending_commits(poll_id).await? {
+            store.mark_poll_sync_complete(poll_id).await?;
         }
     }
     store.mark_polls_without_pending_commits(Utc::now()).await?;
     Ok(())
 }
 
-fn spawn_commit_sync<S>(
+fn spawn_reveal_sync<S>(
     store: Arc<S>,
-    committer: Arc<dyn OnchainCommitter + Send + Sync>,
+    revealer: Arc<dyn OnchainRevealer + Send + Sync>,
     interval: Duration,
 ) where
     S: PollStore + Send + Sync + 'static,
 {
     let store_clone = store.clone();
-    let committer_clone = committer.clone();
+    let revealer_clone = revealer.clone();
     tokio::spawn(async move {
-        if let Err(err) = sync_commits_once(store_clone, committer_clone).await {
-            warn!(?err, "initial commit sync failed");
+        if let Err(err) = sync_reveals_once(store_clone, revealer_clone).await {
+            warn!(?err, "initial reveal sync failed");
         }
     });
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         loop {
             ticker.tick().await;
-            info!("running commit sync job");
-            if let Err(err) = sync_commits_once(store.clone(), committer.clone()).await {
-                warn!(?err, "commit sync job failed");
+            info!("running reveal sync job");
+            if let Err(err) = sync_reveals_once(store.clone(), revealer.clone()).await {
+                warn!(?err, "reveal sync job failed");
             }
         }
     });
@@ -185,14 +296,21 @@ struct AppState<S, B> {
     store: Arc<S>,
     zk: Arc<B>,
     identity_salt: String,
+    contract: Option<Arc<PollsContractClient>>,
 }
 
 impl<S, B> AppState<S, B> {
-    fn new(store: Arc<S>, zk: Arc<B>, identity_salt: String) -> Self {
+    fn new(
+        store: Arc<S>,
+        zk: Arc<B>,
+        identity_salt: String,
+        contract: Option<Arc<PollsContractClient>>,
+    ) -> Self {
         Self {
             store,
             zk,
             identity_salt,
+            contract,
         }
     }
 }
@@ -200,8 +318,9 @@ impl<S, B> AppState<S, B> {
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
     dotenvy::dotenv().ok();
+    let default_level = "debug";
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_level));
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_target(false)
@@ -213,29 +332,43 @@ async fn main() -> Result<(), AppError> {
     let store = Arc::new(pool);
     let zk = Arc::new(NoopZkBackend::default());
 
-    let app_state = AppState::new(store, zk, cfg.identity_salt.clone());
-    let rpc_ws_for_committer = cfg.rpc_ws.clone();
-    let committer: Arc<dyn OnchainCommitter> =
-        if let (Some(ref pk), Some(addr), Some(ref ws)) =
-            (&cfg.relayer_private_key, cfg.contract_address, rpc_ws_for_committer.as_ref())
-        {
-            match EthersCommitter::new(ws, pk, addr).await {
-                Ok(c) => {
-                    info!("On-chain commit sync enabled");
-                    Arc::new(c)
-                }
-                Err(err) => {
-                    warn!(?err, "Failed to init on-chain committer, falling back to noop");
-                    Arc::new(NoopCommitter::default())
-                }
+    let contract_client = if let (Some(ref pk), Some(addr), Some(ref rpc_url)) = (
+        &cfg.relayer_private_key,
+        cfg.contract_address,
+        cfg.rpc_url.as_ref(),
+    ) {
+        match PollsContractClient::new(rpc_url, pk, addr).await {
+            Ok(client) => Some(Arc::new(client)),
+            Err(err) => {
+                warn!(?err, "Failed to init polls contract client");
+                None
             }
-        } else {
-            warn!("RELAYER_PRIVATE_KEY or CONTRACT_ADDRESS missing, commit sync noop");
-            Arc::new(NoopCommitter::default())
-        };
-    spawn_commit_sync(
+        }
+    } else {
+        warn!("RELAYER_PRIVATE_KEY or CONTRACT_ADDRESS missing, contract calls disabled");
+        None
+    };
+
+    let revealer: Arc<dyn OnchainRevealer> = if let Some(client) = contract_client.clone() {
+        info!("On-chain reveal sync enabled");
+        client
+    } else {
+        Arc::new(NoopRevealer::default())
+    };
+    let app_state = AppState::new(
+        store.clone(),
+        zk.clone(),
+        cfg.identity_salt.clone(),
+        contract_client.clone(),
+    );
+    info!(
+        "VeilCast backend initialized (rpc_url set: {}, contract set: {})",
+        cfg.rpc_url.is_some(),
+        cfg.contract_address.is_some()
+    );
+    spawn_reveal_sync(
         app_state.store.clone(),
-        committer,
+        revealer,
         Duration::from_millis(cfg.commit_sync_interval_ms),
     );
     let cors = CorsLayer::very_permissive();
@@ -292,7 +425,7 @@ async fn health() -> impl IntoResponse {
 async fn create_poll<S, B>(
     State(state): State<AppState<S, B>>,
     Json(body): Json<CreatePollRequest>,
-) -> Result<Json<PollResponse>, AppError>
+) -> Result<Json<CreatePollResponse>, AppError>
 where
     S: PollStore + Send + Sync,
 {
@@ -305,20 +438,64 @@ where
         ));
     }
     let membership_root = state.store.membership_root_snapshot().await?;
-    let category = body.category.clone();
-    let record = state
-        .store
-        .create_poll(NewPoll {
-            question: &body.question,
-            options: &body.options,
-            commit_phase_end: body.commit_phase_end,
-            reveal_phase_end: body.reveal_phase_end,
-            membership_root: &membership_root,
-            category: &category,
-        })
-        .await?;
+    let options_owned = body.options.clone();
+    let new_poll = NewPoll {
+        question: &body.question,
+        options: &options_owned,
+        commit_phase_end: body.commit_phase_end,
+        reveal_phase_end: body.reveal_phase_end,
+        membership_root: &membership_root,
+        category: &body.category,
+    };
 
-    Ok(Json(to_response(record)))
+    if let Some(contract) = state.contract.as_ref() {
+        let members = state.store.list_members().await?;
+        if members.is_empty() {
+            return Err(AppError::Validation(
+                "cannot create poll without any allowlisted members".into(),
+            ));
+        }
+
+        let onchain = contract
+            .create_poll_onchain(
+                &body.question,
+                &body.options,
+                body.commit_phase_end,
+                body.reveal_phase_end,
+                &membership_root,
+            )
+            .await?;
+
+        let record = state
+            .store
+            .create_poll_with_id(onchain.poll_id, new_poll, membership_root.clone(), members)
+            .await?;
+        info!(
+            poll_id = record.id,
+            tx_hash = ?onchain.tx_hash,
+            commit_end = %record.commit_phase_end,
+            reveal_end = %record.reveal_phase_end,
+            "Poll created on-chain"
+        );
+
+        Ok(Json(CreatePollResponse {
+            poll: to_response(record),
+            tx_hash: format!("{:#x}", onchain.tx_hash),
+        }))
+    } else {
+        warn!("contract client unavailable; storing poll off-chain only");
+        let record = state.store.create_poll(new_poll).await?;
+        info!(
+            poll_id = record.id,
+            commit_end = %record.commit_phase_end,
+            reveal_end = %record.reveal_phase_end,
+            "Poll created off-chain only"
+        );
+        Ok(Json(CreatePollResponse {
+            poll: to_response(record),
+            tx_hash: String::new(),
+        }))
+    }
 }
 
 async fn get_poll<S, B>(
@@ -352,8 +529,12 @@ where
     S: PollStore + Send + Sync,
 {
     let poll = state.store.get_poll(poll_id).await?;
-    if Utc::now() >= poll.commit_phase_end {
+    let now = Utc::now();
+    if now >= poll.commit_phase_end {
         return Err(AppError::Validation("commit phase over".into()));
+    }
+    if body.choice as usize >= poll.options.len() {
+        return Err(AppError::Validation("invalid choice".into()));
     }
     let username = extract_username(&headers)?
         .ok_or_else(|| AppError::Validation("missing auth header".into()))?;
@@ -365,12 +546,29 @@ where
     {
         return Err(AppError::Validation("not a member of this poll".into()));
     }
+    let path = state.store.merkle_path_for_member(poll_id, &identity_secret).await?;
+    tracing::debug!(
+        poll_id,
+        username,
+        identity = %identity_secret,
+        choice = body.choice,
+        commitment = %body.commitment,
+        nullifier = %body.nullifier,
+        membership_root = %poll.membership_root,
+        path_bits = ?path.as_ref().map(|p| &p.bits),
+        path_siblings = ?path.as_ref().map(|p| &p.siblings),
+        "record_commit inputs"
+    );
     let stored = state
         .store
         .record_commit(StoredCommit {
             poll_id,
+            choice: body.choice as i16,
             commitment: &body.commitment,
             identity_secret: &identity_secret,
+            nullifier: &body.nullifier,
+            proof: &body.proof,
+            public_inputs: &body.public_inputs,
         })
         .await?;
     Ok(Json(CommitResponse {
@@ -378,6 +576,10 @@ where
         commitment: stored.commitment,
         recorded_at: stored.recorded_at,
         identity_secret: stored.identity_secret,
+        nullifier: stored.nullifier,
+        proof: stored.proof,
+        public_inputs: stored.public_inputs,
+        choice: stored.choice,
     }))
 }
 
@@ -451,16 +653,31 @@ where
 {
     let poll = state.store.get_poll(poll_id).await?;
     let username = extract_username(&headers)?;
-    let is_member = if let Some(u) = username {
+    let (is_member, path) = if let Some(ref u) = username {
         let id = derive_identity_secret(&u, &state.identity_salt);
-        state.store.poll_includes_member(poll_id, &id).await?
+        let m = state.store.merkle_path_for_member(poll_id, &id).await?;
+        (m.is_some(), m)
     } else {
-        false
+        (false, None)
     };
+    if let Some(path) = path.as_ref() {
+        tracing::debug!(
+            poll_id,
+            username,
+            bits = ?path.bits,
+            siblings = ?path.siblings,
+            root = %poll.membership_root,
+            "membership path response"
+        );
+    } else {
+        tracing::debug!(poll_id, username, "membership path absent");
+    }
     Ok(Json(MembershipStatusResponse {
         poll_id,
         membership_root: poll.membership_root,
         is_member,
+        path_bits: path.as_ref().map(|p| p.bits.clone()),
+        path_siblings: path.as_ref().map(|p| p.siblings.clone()),
     }))
 }
 
@@ -579,6 +796,7 @@ fn to_response(record: PollRecord) -> PollResponse {
 struct Config {
     database_url: String,
     bind: String,
+    rpc_url: Option<String>,
     rpc_ws: Option<String>,
     contract_address: Option<H160>,
     indexer_from_block: Option<u64>,
@@ -592,6 +810,7 @@ impl Config {
         let database_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://veilcast:veilcast@localhost:5432/veilcast".to_string());
         let bind = std::env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8000".to_string());
+        let rpc_url = std::env::var("RPC_URL").ok();
         let rpc_ws = std::env::var("RPC_WS").ok();
         let contract_address = std::env::var("CONTRACT_ADDRESS")
             .ok()
@@ -599,15 +818,19 @@ impl Config {
         let indexer_from_block = std::env::var("INDEXER_FROM_BLOCK")
             .ok()
             .and_then(|s| s.parse().ok());
-        let identity_salt = std::env::var("IDENTITY_SALT").unwrap_or_else(|_| "demo-salt".to_string());
+        let identity_salt =
+            std::env::var("IDENTITY_SALT").unwrap_or_else(|_| "demo-salt".to_string());
         let commit_sync_interval_ms = std::env::var("COMMIT_SYNC_INTERVAL_MS")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(30_000);
-        let relayer_private_key = std::env::var("RELAYER_PRIVATE_KEY").ok().filter(|s| !s.is_empty());
+        let relayer_private_key = std::env::var("RELAYER_PRIVATE_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
         Self {
             database_url,
             bind,
+            rpc_url,
             rpc_ws,
             contract_address,
             indexer_from_block,
@@ -631,7 +854,7 @@ mod tests {
     fn test_app() -> Router {
         let store = Arc::new(InMemoryStore::default());
         let zk = Arc::new(NoopZkBackend::default());
-        let state = AppState::new(store, zk, "test-salt".to_string());
+        let state = AppState::new(store, zk, "test-salt".to_string(), None);
         app_router(state)
     }
 
@@ -644,7 +867,7 @@ mod tests {
         let expected_root =
             hash_members(&vec!["alice_secret".to_string(), "bob_secret".to_string()]);
         let zk = Arc::new(NoopZkBackend::default());
-        let app = app_router(AppState::new(store, zk, "test-salt".to_string()));
+        let app = app_router(AppState::new(store, zk, "test-salt".to_string(), None));
 
         let body = serde_json::json!({
             "question": "Will it rain?",
@@ -667,8 +890,8 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let body_bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
-        let created: PollResponse = serde_json::from_slice(&body_bytes).unwrap();
-        assert_eq!(created.membership_root, expected_root);
+        let created: CreatePollResponse = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(created.poll.membership_root, expected_root);
 
         let res = app
             .oneshot(
@@ -704,6 +927,7 @@ mod tests {
             .unwrap();
         assert_eq!(login_res.status(), StatusCode::OK);
         let token = "Bearer token:alice";
+        let identity = derive_identity_secret("alice", "test-salt");
 
         let commit_end = Utc::now() + chrono::Duration::milliseconds(50);
         let reveal_end = commit_end + chrono::Duration::minutes(5);
@@ -726,7 +950,36 @@ mod tests {
             .await
             .unwrap();
 
-        let commit_body = serde_json::json!({ "commitment": "c1" });
+        // generate proof client-side equivalent via endpoint for test convenience
+        let prove_body = serde_json::json!({
+            "choice": 1,
+            "secret": "42",
+            "identity_secret": identity
+        });
+        let prove_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/polls/0/prove")
+                    .header("content-type", "application/json")
+                    .body(Body::from(prove_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(prove_res.status(), StatusCode::OK);
+        let bundle: ProofBundle =
+            serde_json::from_slice(&to_bytes(prove_res.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+
+        let commit_body = serde_json::json!({
+            "choice": 1,
+            "commitment": bundle.commitment,
+            "nullifier": bundle.nullifier,
+            "proof": bundle.proof,
+            "public_inputs": bundle.public_inputs
+        });
         let commit_res = app
             .clone()
             .oneshot(
@@ -745,32 +998,11 @@ mod tests {
         // Move into reveal window
         tokio::time::sleep(std::time::Duration::from_millis(60)).await;
 
-        let prove_body = serde_json::json!({
-            "choice": 1,
-            "secret": "42",
-            "identity_secret": "99"
-        });
-        let prove_res = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/polls/0/prove")
-                    .header("content-type", "application/json")
-                    .body(Body::from(prove_body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(prove_res.status(), StatusCode::OK);
-
-        let body_bytes = to_bytes(prove_res.into_body(), usize::MAX).await.unwrap();
-        let proof: ProofBundle = serde_json::from_slice(&body_bytes).unwrap();
         let reveal_body = serde_json::json!({
-            "proof": proof.proof,
-            "public_inputs": proof.public_inputs,
-            "commitment": proof.commitment,
-            "nullifier": proof.nullifier
+            "proof": bundle.proof,
+            "public_inputs": bundle.public_inputs,
+            "commitment": bundle.commitment,
+            "nullifier": bundle.nullifier
         });
         let reveal_res = app
             .oneshot(
@@ -787,23 +1019,24 @@ mod tests {
     }
 
     #[derive(Default, Clone)]
-    struct RecordingCommitter {
-        calls: Arc<Mutex<Vec<(i64, String)>>>,
+    struct RecordingRevealer {
+        calls: Arc<Mutex<Vec<(i64, usize)>>>,
     }
 
     #[async_trait]
-    impl OnchainCommitter for RecordingCommitter {
-        async fn submit_commit(&self, poll_id: i64, commitment: &str) -> AppResult<()> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((poll_id, commitment.to_string()));
+    impl OnchainRevealer for RecordingRevealer {
+        async fn submit_batch_reveal(
+            &self,
+            poll_id: i64,
+            items: &[CommitSyncRow],
+        ) -> AppResult<()> {
+            self.calls.lock().unwrap().push((poll_id, items.len()));
             Ok(())
         }
     }
 
     #[tokio::test]
-    async fn commit_sync_submits_pending_commits() {
+    async fn reveal_sync_submits_pending_batches() {
         let store = Arc::new(InMemoryStore::default());
         let poll = store
             .create_poll(NewPoll {
@@ -819,17 +1052,21 @@ mod tests {
         store
             .record_commit(StoredCommit {
                 poll_id: poll.id,
-                commitment: "commit-1",
+                choice: 0,
+                commitment: "0x1",
                 identity_secret: "id1",
+                nullifier: "0x2",
+                proof: "0x00",
+                public_inputs: &vec!["0x0".to_string()],
             })
             .await
             .unwrap();
-        let committer = Arc::new(RecordingCommitter::default());
-        sync_commits_once(store.clone(), committer.clone())
+        let revealer = Arc::new(RecordingRevealer::default());
+        sync_reveals_once(store.clone(), revealer.clone())
             .await
             .unwrap();
-        assert_eq!(committer.calls.lock().unwrap().len(), 1);
-        sync_commits_once(store, committer.clone()).await.unwrap();
-        assert_eq!(committer.calls.lock().unwrap().len(), 1);
+        assert_eq!(revealer.calls.lock().unwrap().len(), 1);
+        sync_reveals_once(store, revealer.clone()).await.unwrap();
+        assert_eq!(revealer.calls.lock().unwrap().len(), 1);
     }
 }

@@ -28,7 +28,7 @@ export default function App() {
   return (
     <WagmiProvider config={wagmiConfig}>
       <QueryClientProvider client={queryClient}>
-        <Router>
+        <Router future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
           <Navbar />
           <main className="mx-auto flex max-w-6xl flex-col gap-8 px-6 pb-16 pt-8">
             <Routes>

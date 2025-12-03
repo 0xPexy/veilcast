@@ -17,7 +17,7 @@ services:
   backend:
     build:
       context: ../backend
-      target: builder
+      target: runtime
     container_name: veilcast-backend
     depends_on:
       - db
@@ -46,9 +46,13 @@ services:
       - "8000:8000"
     volumes:
       - ../backend:/app
+      - ../backend/node_modules:/app/node_modules
     environment:
       - DATABASE_URL=${DATABASE_URL:-postgres://veilcast:veilcast@db:5432/veilcast}
-    command: sh -c "cargo install cargo-watch --locked || true && cargo watch -x run"
+    command: >
+      sh -c "npm install --omit=dev &&
+             cargo install cargo-watch --locked || true &&
+             cargo watch -x run"
 
   frontend:
     build:

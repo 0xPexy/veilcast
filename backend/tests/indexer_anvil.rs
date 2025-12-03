@@ -7,8 +7,8 @@ use ethers::contract::{Contract, ContractFactory};
 use ethers::middleware::{Middleware, SignerMiddleware};
 use ethers::providers::{Provider, Ws};
 use ethers::signers::{LocalWallet, Signer};
-use ethers::types::{Address, Bytes, H256, Log, U256};
 use ethers::types::BigEndianHash;
+use ethers::types::{Address, Bytes, Log, H256, U256};
 use ethers::utils::Anvil;
 use serde_json::Value;
 use veilcast_backend::indexer;
@@ -16,8 +16,12 @@ use veilcast_backend::repo::{InMemoryStore, PollStore};
 
 // Helper: load abi/bytecode from forge artifact JSON.
 fn load_artifact(path: &Path) -> (Abi, Bytes) {
-    let content = std::fs::read_to_string(path)
-        .unwrap_or_else(|_| panic!("artifact not found at {:?}. Run `forge build` in contracts.", path));
+    let content = std::fs::read_to_string(path).unwrap_or_else(|_| {
+        panic!(
+            "artifact not found at {:?}. Run `forge build` in contracts.",
+            path
+        )
+    });
     let v: Value = serde_json::from_str(&content).expect("invalid json");
     let abi: Abi = serde_json::from_value(v.get("abi").unwrap().clone()).expect("abi decode");
     let bytecode_val = v.get("bytecode").expect("missing bytecode");
@@ -30,7 +34,8 @@ fn load_artifact(path: &Path) -> (Abi, Bytes) {
             .map(str::to_string)
             .expect("bytecode object string")
     };
-    let bytecode = Bytes::from(hex::decode(bytecode_hex.trim_start_matches("0x")).expect("hex decode"));
+    let bytecode =
+        Bytes::from(hex::decode(bytecode_hex.trim_start_matches("0x")).expect("hex decode"));
     (abi, bytecode)
 }
 
@@ -64,7 +69,10 @@ async fn indexer_captures_poll_created_on_anvil() {
     let store = Arc::new(InMemoryStore::default());
 
     // 4) Call createPoll to emit PollCreated
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let commit_end = now + 300;
     let reveal_end = commit_end + 600;
     Contract::new(polls_addr, polls_abi, client.clone())
@@ -111,15 +119,21 @@ async fn indexer_handles_vote_and_resolve_logs() {
         456,
         999,
     );
-    indexer::handle_log(&store, created_log).await.expect("poll created");
+    indexer::handle_log(&store, created_log)
+        .await
+        .expect("poll created");
 
     // Feed VoteRevealed
     let vote_log = make_vote_revealed_log(polls_addr, 0, 1, 7777);
-    indexer::handle_log(&store, vote_log).await.expect("vote handled");
+    indexer::handle_log(&store, vote_log)
+        .await
+        .expect("vote handled");
 
     // Feed PollResolved
     let resolved_log = make_poll_resolved_log(polls_addr, 0, 1);
-    indexer::handle_log(&store, resolved_log).await.expect("resolved");
+    indexer::handle_log(&store, resolved_log)
+        .await
+        .expect("resolved");
 
     let updated = store.get_poll(0).await.expect("poll exists");
     assert!(updated.resolved);
@@ -135,8 +149,9 @@ fn make_poll_created_log(
     reveal_end: u64,
     membership_root: u64,
 ) -> Log {
-    let sig =
-        H256::from(ethers::utils::keccak256("PollCreated(uint256,string,string[],uint256,uint256,uint256)"));
+    let sig = H256::from(ethers::utils::keccak256(
+        "PollCreated(uint256,string,string[],uint256,uint256,uint256)",
+    ));
     let topics = vec![sig, H256::from_uint(&U256::from(poll_id))];
     let data = abi::encode(&[
         Token::String(question.into()),
@@ -154,7 +169,9 @@ fn make_poll_created_log(
 }
 
 fn make_vote_revealed_log(addr: Address, poll_id: u64, choice_index: u8, nullifier: u64) -> Log {
-    let sig = H256::from(ethers::utils::keccak256("VoteRevealed(uint256,uint8,uint256)"));
+    let sig = H256::from(ethers::utils::keccak256(
+        "VoteRevealed(uint256,uint8,uint256)",
+    ));
     let topics = vec![sig];
     let data = abi::encode(&[
         Token::Uint(U256::from(poll_id)),

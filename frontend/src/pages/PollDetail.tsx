@@ -1,16 +1,18 @@
 import { useParams } from 'react-router-dom';
-import { useQuery, useMutation } from '@tanstack/react-query';
-import { fetchPoll, commitVote, proveVote, revealVote, fetchMembershipStatus, fetchCommitStatus } from '../lib/api';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { fetchPoll, commitVote, fetchMembershipStatus, fetchCommitStatus } from '../lib/api';
 import { PollView } from '../lib/types';
 import { Clock3, ShieldCheck, Trophy } from 'lucide-react';
 import { useState } from 'react';
 import { getIdentitySecret, getToken } from '../lib/auth';
-import { computeCommitment } from '../lib/zk';
+import { generateProofClient, selfTestProverInputs } from '../lib/proof';
 
 export function PollDetailPage() {
   const { id } = useParams();
   const pollId = Number(id);
-  const { data: poll, isLoading, isError, refetch } = useQuery<PollView>({
+  const queryClient = useQueryClient();
+
+  const { data: poll, isLoading, isError } = useQuery<PollView>({
     queryKey: ['poll', pollId],
     queryFn: () => fetchPoll(pollId),
   });
@@ -21,30 +23,12 @@ export function PollDetailPage() {
     queryFn: () => fetchMembershipStatus(pollId, token as string),
     enabled: !!token,
   });
-  const { data: commitStatus, isLoading: commitStatusLoading, refetch: refetchCommitStatus } = useQuery({
+  const { data: commitStatus, isLoading: commitStatusLoading } = useQuery({
     queryKey: ['commitStatus', pollId, token],
     queryFn: () => fetchCommitStatus(pollId, token as string),
     enabled: !!token,
   });
 
-  const commitMutation = useMutation({
-    mutationFn: (commitment: string) => commitVote(pollId, commitment, token || undefined),
-    onSuccess: () => {
-      refetch();
-      refetchCommitStatus();
-    },
-  });
-  const proveMutation = useMutation({
-    mutationFn: (input: { choice: number; secret: string; identitySecret: string }) =>
-      proveVote(pollId, input.choice, input.secret, input.identitySecret),
-  });
-  const revealMutation = useMutation({
-    mutationFn: (payload: { proof: string; public_inputs: string[]; commitment: string; nullifier: string }) =>
-      revealVote(pollId, payload),
-    onSuccess: () => refetch(),
-  });
-
-  const [commitmentInput, setCommitmentInput] = useState('');
   const [choice, setChoice] = useState(0);
   const [secret, setSecret] = useState('');
   const [identitySecret, setIdentitySecret] = useState(storedIdentity ?? '');
@@ -52,7 +36,62 @@ export function PollDetailPage() {
   const [commitComputed, setCommitComputed] = useState<string | null>(null);
   const [commitError, setCommitError] = useState<string | null>(null);
 
-  const canCommit = !!token && (membership?.is_member ?? false) && !(commitStatus?.already_committed ?? false);
+  const commitMutation = useMutation({
+    mutationFn: async () => {
+      // Run a dummy proof (Prover.toml inputs) first to ensure Noir execution is healthy.
+      await selfTestProverInputs();
+
+      if (!poll || !identitySecret) throw new Error('missing poll or identity');
+      if (!membership?.path_bits || !membership.path_siblings) {
+        throw new Error('missing membership merkle path');
+      }
+      console.groupCollapsed('proof inputs');
+      console.log('choice', choice);
+      console.log('secret', secret);
+      console.log('identitySecret', identitySecret);
+      console.log('pollId', poll.id);
+      console.log('membership_root', poll.membership_root);
+      console.log('path_bits', membership.path_bits);
+      console.log('path_siblings', membership.path_siblings);
+      console.groupEnd();
+
+      const bundle = await generateProofClient(
+        choice,
+        secret,
+        identitySecret,
+        poll.id,
+        poll.membership_root,
+        membership.path_bits,
+        membership.path_siblings,
+      );
+      console.groupCollapsed('generated bundle');
+      console.log(bundle);
+      console.groupEnd();
+
+      setCommitComputed(bundle.commitment);
+      return commitVote(
+        pollId,
+        {
+          choice,
+          commitment: bundle.commitment,
+          nullifier: bundle.nullifier,
+          proof: bundle.proof,
+          public_inputs: bundle.public_inputs,
+        },
+        token || undefined,
+      );
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['poll', pollId] });
+      queryClient.invalidateQueries({ queryKey: ['commitStatus', pollId, token] });
+    },
+    onError: (err: any) => {
+      setCommitError(err?.message || 'commit failed');
+    },
+  });
+
+  const canCommit =
+    !!token && (membership?.is_member ?? false) && !(commitStatus?.already_committed ?? false);
 
   if (isLoading) return <div className="glass h-48 animate-pulse bg-white/5" />;
   if (isError || !poll) return <div className="glass p-4 text-amber-300">Poll not found.</div>;
@@ -93,7 +132,7 @@ export function PollDetailPage() {
             <ShieldCheck size={16} />
             Membership root
           </div>
-          <p className="mt-2 text-sm text-white/70 break-words">{poll.membership_root}</p>
+          <p className="mt-2 break-words text-sm text-white/70">{poll.membership_root}</p>
           {poll.resolved && poll.correct_option != null && (
             <div className="mt-3 flex items-center gap-2 rounded-lg bg-gradient-to-r from-poseidon/30 to-magenta/30 px-3 py-2 text-sm text-white">
               <Trophy size={16} />
@@ -136,7 +175,7 @@ export function PollDetailPage() {
             </div>
             <div className="grid gap-2 md:grid-cols-2">
               <label className="flex flex-col gap-1 text-sm text-white/70">
-                Secret (keep safe; needed again at reveal)
+                Secret (used for commitment/proof)
                 <input
                   value={secret}
                   onChange={(e) => setSecret(e.target.value)}
@@ -165,9 +204,7 @@ export function PollDetailPage() {
               onClick={async () => {
                 try {
                   setCommitError(null);
-                  const commitment = await computeCommitment(choice, secret || '0');
-                  setCommitComputed(commitment);
-                  await commitMutation.mutateAsync(commitment);
+                  await commitMutation.mutateAsync();
                 } catch (err) {
                   setCommitError((err as Error).message);
                 }
@@ -179,7 +216,7 @@ export function PollDetailPage() {
                 ? 'Committing…'
                 : commitStatus?.already_committed
                   ? 'Already committed'
-                  : 'Commit vote'}
+                  : 'Lock in vote'}
             </button>
             {commitComputed && (
               <p className="text-xs text-white/60">
@@ -193,66 +230,12 @@ export function PollDetailPage() {
           </div>
         )}
         {poll.phase === 'reveal' && (
-          <div className="mt-3 flex flex-col gap-3">
-            <div className="flex flex-wrap gap-2">
-              {poll.options.slice(0, 2).map((opt, idx) => (
-                <button
-                  key={`${opt}-${idx}`}
-                  type="button"
-                  onClick={() => setChoice(idx)}
-                  className={`rounded-full px-4 py-2 text-sm font-semibold ${
-                    choice === idx
-                      ? 'bg-gradient-to-r from-poseidon to-cyan text-white shadow-glow'
-                      : 'bg-white/5 text-white/80 hover:bg-white/10'
-                  }`}
-                >
-                  {opt}
-                </button>
-              ))}
-            </div>
-            <div className="grid gap-2 md:grid-cols-2">
-              <label className="flex flex-col gap-1 text-sm text-white/70">
-                Secret
-                <input
-                  value={secret}
-                  onChange={(e) => setSecret(e.target.value)}
-                  className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 outline-none focus:border-cyan/60"
-                />
-              </label>
-              <label className="flex flex-col gap-1 text-sm text-white/70">
-                Identity secret
-                <input
-                  value={identitySecret}
-                  onChange={(e) => setIdentitySecret(e.target.value)}
-                  className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 outline-none focus:border-cyan/60"
-                />
-              </label>
-            </div>
-            <button
-              onClick={async () => {
-                const proof = await proveMutation.mutateAsync({
-                  choice,
-                  secret,
-                  identitySecret,
-                });
-                await revealMutation.mutateAsync(proof);
-              }}
-              disabled={proveMutation.isLoading || revealMutation.isLoading}
-              className="w-fit rounded-full bg-gradient-to-r from-poseidon to-cyan px-5 py-2 text-sm font-semibold shadow-glow disabled:opacity-60"
-            >
-              {proveMutation.isLoading || revealMutation.isLoading ? 'Revealing…' : 'Generate proof & reveal'}
-            </button>
-            {(proveMutation.error || revealMutation.error) && (
-              <p className="text-sm text-amber-300">
-                Failed:{' '}
-                {((proveMutation.error ?? revealMutation.error) as Error | undefined)?.message ??
-                  'unknown error'}
-              </p>
-            )}
+          <div className="mt-3 text-sm text-white/70">
+            Reveal in progress. Your commitment will be revealed automatically by the relayer.
           </div>
         )}
         {poll.phase === 'resolved' && (
-          <p className="mt-3 text-sm text-white/70">Poll resolved. View results above.</p>
+          <div className="mt-3 text-sm text-white/70">Poll resolved. See results above.</div>
         )}
       </Card>
     </div>
@@ -260,5 +243,9 @@ export function PollDetailPage() {
 }
 
 function Card({ children }: { children: React.ReactNode }) {
-  return <div className="glass p-4">{children}</div>;
+  return (
+    <div className="glass flex flex-col gap-3 p-4">
+      {children}
+    </div>
+  );
 }

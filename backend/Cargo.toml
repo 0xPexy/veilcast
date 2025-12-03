@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 axum = { version = "0.7", features = ["macros", "json"] }
-tokio = { version = "1.37", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.37", features = ["macros", "rt-multi-thread", "process"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_with = "3.11"
@@ -43,6 +43,9 @@ hex = "0.4"
 [dev-dependencies]
 axum = { version = "0.7", features = ["macros", "json"] }
 tower = { version = "0.4", features = ["util"] }
-tokio = { version = "1.37", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.37", features = ["macros", "rt-multi-thread", "process"] }
 serde_json = "1.0"
 hex = "0.4"
+tempfile = "3"
+toml = "0.8"
+num-bigint = "0.4"

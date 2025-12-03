@@ -1,4 +1,4 @@
-import { Poll, PollView, CommitStatus, MembershipStatus } from './types';
+import { Poll, PollView, CommitStatus, MembershipStatus, CreatePollResult } from './types';
 import { computePhase, formatCountdown } from './time';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
@@ -57,24 +57,34 @@ export async function createPoll(body: {
   commit_phase_end: string;
   reveal_phase_end: string;
   category: string;
-}) {
+}): Promise<CreatePollResult> {
   const res = await fetch(`${API_BASE}/polls`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error('failed to create poll');
-  return res.json();
+  return res.json() as Promise<CreatePollResult>;
 }
 
-export async function commitVote(pollId: number, commitment: string, token?: string) {
+export async function commitVote(
+  pollId: number,
+  payload: {
+    choice: number;
+    commitment: string;
+    nullifier: string;
+    proof: string;
+    public_inputs: string[];
+  },
+  token?: string,
+) {
   const res = await fetch(`${API_BASE}/polls/${pollId}/commit`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({ commitment }),
+    body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error('failed to commit');
   return res.json();
