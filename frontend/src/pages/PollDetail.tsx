@@ -5,7 +5,7 @@ import { PollView } from '../lib/types';
 import { Clock3, ShieldCheck, Trophy } from 'lucide-react';
 import { useState } from 'react';
 import { getIdentitySecret, getToken } from '../lib/auth';
-import { generateProofClient, selfTestProverInputs } from '../lib/proof';
+import { generateProofClient } from '../lib/proof';
 
 export function PollDetailPage() {
   const { id } = useParams();
@@ -34,26 +34,20 @@ export function PollDetailPage() {
   const [identitySecret, setIdentitySecret] = useState(storedIdentity ?? '');
   const [showIdentity, setShowIdentity] = useState(false);
   const [commitComputed, setCommitComputed] = useState<string | null>(null);
-  const [commitError, setCommitError] = useState<string | null>(null);
+  const [proofPhase, setProofPhase] = useState<'idle' | 'proving' | 'submitting' | 'success' | 'error'>('idle');
+  const [proofMessage, setProofMessage] = useState<string>('');
+  const [proofStep, setProofStep] = useState(0);
 
   const commitMutation = useMutation({
     mutationFn: async () => {
-      // Run a dummy proof (Prover.toml inputs) first to ensure Noir execution is healthy.
-      await selfTestProverInputs();
-
       if (!poll || !identitySecret) throw new Error('missing poll or identity');
       if (!membership?.path_bits || !membership.path_siblings) {
         throw new Error('missing membership merkle path');
       }
-      console.groupCollapsed('proof inputs');
-      console.log('choice', choice);
-      console.log('secret', secret);
-      console.log('identitySecret', identitySecret);
-      console.log('pollId', poll.id);
-      console.log('membership_root', poll.membership_root);
-      console.log('path_bits', membership.path_bits);
-      console.log('path_siblings', membership.path_siblings);
-      console.groupEnd();
+      setProofPhase('proving');
+      setProofStep(1);
+      setProofMessage('Generating anonymous proof…');
+      setCommitComputed(null);
 
       const bundle = await generateProofClient(
         choice,
@@ -64,9 +58,9 @@ export function PollDetailPage() {
         membership.path_bits,
         membership.path_siblings,
       );
-      console.groupCollapsed('generated bundle');
-      console.log(bundle);
-      console.groupEnd();
+      setProofPhase('submitting');
+      setProofStep(2);
+      setProofMessage('Submitting commitment…');
 
       setCommitComputed(bundle.commitment);
       return commitVote(
@@ -82,11 +76,14 @@ export function PollDetailPage() {
       );
     },
     onSuccess: () => {
+      setProofPhase('success');
+      setProofMessage('Vote locked in. Reveal will run automatically in the reveal window.');
       queryClient.invalidateQueries({ queryKey: ['poll', pollId] });
       queryClient.invalidateQueries({ queryKey: ['commitStatus', pollId, token] });
     },
     onError: (err: any) => {
-      setCommitError(err?.message || 'commit failed');
+      setProofPhase('error');
+      setProofMessage(err?.message || 'Proof or submission failed.');
     },
   });
 
@@ -201,14 +198,7 @@ export function PollDetailPage() {
               </div>
             </div>
             <button
-              onClick={async () => {
-                try {
-                  setCommitError(null);
-                  await commitMutation.mutateAsync();
-                } catch (err) {
-                  setCommitError((err as Error).message);
-                }
-              }}
+              onClick={() => commitMutation.mutate()}
               disabled={commitMutation.isLoading || !canCommit || !secret}
               className="w-fit rounded-full bg-gradient-to-r from-poseidon to-cyan px-5 py-2 text-sm font-semibold shadow-glow disabled:opacity-60"
             >
@@ -223,10 +213,7 @@ export function PollDetailPage() {
                 Commitment used: <span className="break-all text-white/80">{commitComputed}</span>
               </p>
             )}
-            {commitMutation.error && (
-              <p className="text-sm text-amber-300">Failed: {(commitMutation.error as Error).message}</p>
-            )}
-            {commitError && <p className="text-sm text-amber-300">Error: {commitError}</p>}
+            <ProofProgress phase={proofPhase} message={proofMessage} step={proofStep} />
           </div>
         )}
         {poll.phase === 'reveal' && (
@@ -238,6 +225,64 @@ export function PollDetailPage() {
           <div className="mt-3 text-sm text-white/70">Poll resolved. See results above.</div>
         )}
       </Card>
+    </div>
+  );
+}
+
+function ProofProgress({
+  phase,
+  message,
+  step,
+}: {
+  phase: 'idle' | 'proving' | 'submitting' | 'success' | 'error';
+  message: string;
+  step: number;
+}) {
+  if (phase === 'idle') return null;
+  const steps = [
+    { id: 1, label: 'Generate proof' },
+    { id: 2, label: 'Submit commitment' },
+  ];
+  const badge = (state: 'pending' | 'running' | 'done' | 'error') => {
+    switch (state) {
+      case 'done':
+        return 'text-emerald-300';
+      case 'running':
+        return 'text-cyan';
+      case 'error':
+        return 'text-amber-300';
+      default:
+        return 'text-white/40';
+    }
+  };
+
+  const getState = (id: number): 'pending' | 'running' | 'done' | 'error' => {
+    if (phase === 'proving') return id === 1 ? 'running' : 'pending';
+    if (phase === 'submitting') return id === 1 ? 'done' : 'running';
+    if (phase === 'success') return 'done';
+    if (phase === 'error') {
+      if (step < id) return 'pending';
+      if (step === id) return 'error';
+      return 'done';
+    }
+    return 'pending';
+  };
+
+  return (
+    <div className="rounded-xl border border-white/10 bg-white/5 p-3 text-sm text-white/80">
+      <p className="font-semibold text-white">Proof progress</p>
+      <div className="mt-2 space-y-1">
+        {steps.map((item) => {
+          const state = getState(item.id);
+          return (
+            <div key={item.id} className={`flex items-center gap-2 ${badge(state)}`}>
+              <span className="text-xs uppercase">{state === 'done' ? 'Done' : state === 'running' ? 'Now' : state === 'error' ? 'Error' : 'Waiting'}</span>
+              <span className="text-white/80">{item.label}</span>
+            </div>
+          );
+        })}
+      </div>
+      <p className="mt-2 text-xs text-white/70">{message}</p>
     </div>
   );
 }

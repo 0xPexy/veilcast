@@ -41,9 +41,8 @@ export async function computeCommitment(choice: number, secret: string | bigint)
   const c = new bbModule!.Fr(modField(BigInt(choice)));
   const s = new bbModule!.Fr(modField(typeof secret === 'string' ? BigInt(secret) : secret));
   const z = new bbModule!.Fr(0n);
-  // Align with circuit: poseidon2_permutation([a, b, 0, 0])[0]
-  const hash = api.poseidon2Hash([c, s, z, z]);
-  return toHex(hash.toBuffer());
+  const [result] = api.poseidon2Permutation([c, s, z, z]);
+  return toHex(result.toBuffer());
 }
 
 export async function computeNullifier(identitySecret: string | bigint, pollId: number): Promise<string> {
@@ -51,7 +50,6 @@ export async function computeNullifier(identitySecret: string | bigint, pollId: 
   const id = new bbModule!.Fr(modField(typeof identitySecret === 'string' ? BigInt(identitySecret) : identitySecret));
   const pid = new bbModule!.Fr(modField(BigInt(pollId)));
   const z = new bbModule!.Fr(0n);
-  // Align with circuit: poseidon2_permutation([id, pollId, 0, 0])[0]
-  const hash = api.poseidon2Hash([id, pid, z, z]);
-  return toHex(hash.toBuffer());
+  const [result] = api.poseidon2Permutation([id, pid, z, z]);
+  return toHex(result.toBuffer());
 }

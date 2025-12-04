@@ -4,6 +4,8 @@
   "type": "module",
   "version": "0.1.0",
   "dependencies": {
-    "@aztec/bb.js": "2.1.8"
+    "@noir-lang/noir_js": "1.0.0-beta.15",
+    "@aztec/bb.js": "2.1.8",
+    "toml": "^3.0.0"
   }
 }

@@ -49,7 +49,6 @@ export function CreatePollPage() {
     if (result.tx_hash) {
       const href = `${ETHERSCAN_BASE}/tx/${result.tx_hash}`;
       setTxLink(href);
-      window.open(href, '_blank');
     }
   };
 
@@ -143,11 +142,11 @@ export function CreatePollPage() {
             {isPending ? 'Creating…' : 'Create poll'}
           </button>
           {isSuccess && (
-            <span className="flex items-center gap-3 text-sm text-cyan">
-              {lastPollId !== null ? `Poll #${lastPollId} created!` : 'Poll created!'}
+            <div className="flex flex-wrap items-center gap-3 text-sm text-cyan">
+              <span>{lastPollId !== null ? `Poll #${lastPollId} created!` : 'Poll created!'}</span>
               {txLink && (
                 <a
-                  className="underline decoration-dotted hover:text-white"
+                  className="rounded-full border border-cyan/60 px-3 py-1 text-xs font-semibold text-cyan hover:text-white hover:border-white/70"
                   href={txLink}
                   target="_blank"
                   rel="noreferrer"
@@ -164,7 +163,7 @@ export function CreatePollPage() {
                   View poll
                 </button>
               )}
-            </span>
+            </div>
           )}
           {error && <span className="text-sm text-amber-300">Failed: {(error as Error).message}</span>}
         </div>

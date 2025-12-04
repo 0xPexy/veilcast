@@ -116,25 +116,18 @@ export async function generateProofClient(
   path_bits: string[],
   path_siblings: string[],
 ): Promise<GeneratedProof> {
-  console.log('[genProof] start');
   const { noir, honk } = await loadCircuit();
-
-  // Debug input types (force console.log so it always shows)
-  console.log('[proof] choice', choice, typeof choice);
-  console.log('[proof] secret', secret, typeof secret);
-  console.log('[proof] identitySecret', identitySecret, typeof identitySecret);
 
   const fieldChoice = toField(choice);
   const fieldSecret = toField(secret);
-  const identityRaw = toBigIntAuto(identitySecret);
-  const fieldId = toField(identityRaw.toString());
+  // Use identity exactly as provided (hex from server); ensure string is preserved
+  const identityRaw = identitySecret;
+  const fieldId = toField(identityRaw);
   const fieldPoll = toField(pollId);
   const fieldRoot = toField(membershipRoot);
 
   const commitment = await computeCommitment(Number(fieldChoice), fieldSecret.toString());
   const nullifier = await computeNullifier(fieldId.toString(), Number(fieldPoll));
-  console.log('[genProof] commitment', commitment);
-  console.log('[genProof] nullifier', nullifier);
 
   // normalize path arrays to depth 20
   const bitsPadded = Array.from({ length: 20 }, (_, i) => toField(path_bits[i] ?? 0));
@@ -152,48 +145,14 @@ export async function generateProofClient(
     path_siblings: sibPadded.map((s) => s.toString()),
   };
 
-  console.log('[genProof] input built', input);
-
-  // Recompute root in JS for quick sanity-check
-  try {
-    const { Barretenberg, Fr } = await import('@aztec/bb.js');
-    const bb = await Barretenberg.new(1);
-    const zero = new Fr(0n);
-    const poseidon2 = async (a: bigint, b: bigint) =>
-      (await bb.poseidon2Hash([new Fr(a), new Fr(b), zero, zero])).toString();
-
-    const commitCheck = await poseidon2(fieldChoice, fieldSecret);
-    const nullifierCheck = await poseidon2(fieldId, fieldPoll);
-    console.log('[proof] commit check', commitCheck);
-    console.log('[proof] nullifier check', nullifierCheck);
-
-    let node = (await bb.poseidon2Hash([new Fr(fieldId), zero, zero, zero])).toString();
-    for (let i = 0; i < 20; i++) {
-      const bit = bitsPadded[i];
-      const sib = sibPadded[i];
-      node =
-        bit === 0n
-          ? await poseidon2(BigInt(node), sib)
-          : await poseidon2(sib, BigInt(node));
-    }
-    console.log('[proof] recomputed root', node, 'expected', fieldRoot.toString());
-    await bb.destroy();
-  } catch (e) {
-    console.warn('[proof] root recompute failed (optional debug)', e);
-  }
-
-  console.log('[genProof] executing noir');
   let witness;
   try {
     const res = await noir.execute(input);
     witness = res.witness;
   } catch (e) {
-    console.error('[genProof] noir execute failed', e);
     throw e;
   }
   const { proof: proofBytes, publicInputs } = await honk.generateProof(witness, { keccak: true });
-
-  console.log('[genProof] proof generated');
 
   const public_inputs = publicInputs.map((v: any) => hexPad(toBigIntAuto(v)));
 

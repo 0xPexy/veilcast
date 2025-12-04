@@ -32,6 +32,7 @@ use ethers::middleware::SignerMiddleware;
 use ethers::providers::{Http, Middleware, Provider};
 use ethers::signers::{LocalWallet, Signer};
 use hex;
+use num_bigint::BigUint;
 use once_cell::sync::OnceCell;
 use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
@@ -39,11 +40,13 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::time::Duration;
 use tower_http::cors::CorsLayer;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 static IDENTITY_SALT: OnceCell<String> = OnceCell::new();
+const BN254_FR_MODULUS: &str =
+    "21888242871839275222246405745257275088548364400416034343698204186575808495617";
 
 abigen!(
     VeilCastContract,
@@ -115,7 +118,7 @@ impl PollsContractClient {
     ) -> AppResult<CreatePollTxResult> {
         let commit_u256 = to_unix_u256(commit_phase_end)?;
         let reveal_u256 = to_unix_u256(reveal_phase_end)?;
-        let membership_u256 = parse_u256_hex(membership_root)?;
+        let membership_u256 = parse_field_u256(membership_root)?;
 
         let call = self.contract.create_poll(
             question.to_string(),
@@ -159,12 +162,22 @@ fn parse_h256_hex(value: &str) -> AppResult<H256> {
     Ok(H256(buf))
 }
 
-fn parse_u256_hex(value: &str) -> AppResult<U256> {
-    let hex_str = value.strip_prefix("0x").unwrap_or(value);
-    if hex_str.is_empty() {
+fn parse_field_u256(value: &str) -> AppResult<U256> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
         return Ok(U256::zero());
     }
-    U256::from_str_radix(hex_str, 16).map_err(|e| AppError::Validation(format!("invalid hex: {e}")))
+    if let Some(hex_str) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+        if hex_str.is_empty() {
+            return Ok(U256::zero());
+        }
+        return U256::from_str_radix(hex_str, 16)
+            .map_err(|e| AppError::Validation(format!("invalid hex: {e}")));
+    }
+    let big = BigUint::from_str(trimmed)
+        .map_err(|e| AppError::Validation(format!("invalid decimal: {e}")))?;
+    let bytes = big.to_bytes_be();
+    Ok(U256::from_big_endian(&bytes))
 }
 
 fn to_unix_u256(ts: chrono::DateTime<Utc>) -> AppResult<U256> {
@@ -193,8 +206,8 @@ impl OnchainRevealer for PollsContractClient {
 
         for it in items {
             choices.push(it.choice as u8);
-            commitments.push(parse_u256_hex(&it.commitment)?);
-            nullifiers.push(parse_u256_hex(&it.nullifier)?);
+            commitments.push(parse_field_u256(&it.commitment)?);
+            nullifiers.push(parse_field_u256(&it.nullifier)?);
             let proof_bytes = hex::decode(it.proof.trim_start_matches("0x"))
                 .map_err(|e| AppError::Validation(format!("invalid proof hex: {e}")))?;
             proofs.push(Bytes::from(proof_bytes));
@@ -319,8 +332,11 @@ impl<S, B> AppState<S, B> {
 async fn main() -> Result<(), AppError> {
     dotenvy::dotenv().ok();
     let default_level = "debug";
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+    let base_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_level));
+    let env_filter = base_filter
+        .add_directive("sqlx=warn".parse().unwrap())
+        .add_directive("sqlx::query=off".parse().unwrap());
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_target(false)
@@ -429,6 +445,13 @@ async fn create_poll<S, B>(
 where
     S: PollStore + Send + Sync,
 {
+    debug!(
+        question = %body.question,
+        options = body.options.len(),
+        commit_end = %body.commit_phase_end,
+        reveal_end = %body.reveal_phase_end,
+        "create_poll request"
+    );
     if body.options.len() < 2 {
         return Err(AppError::Validation("options must be >= 2".into()));
     }
@@ -505,6 +528,7 @@ async fn get_poll<S, B>(
 where
     S: PollStore + Send + Sync,
 {
+    debug!(poll_id, "get_poll request");
     let record = state.store.get_poll(poll_id).await?;
     Ok(Json(to_response(record)))
 }
@@ -515,6 +539,7 @@ async fn list_polls<S, B>(
 where
     S: PollStore + Send + Sync,
 {
+    debug!("list_polls request");
     let records = state.store.list_polls(50).await?;
     Ok(Json(records.into_iter().map(to_response).collect()))
 }
@@ -528,6 +553,7 @@ async fn record_commit<S, B>(
 where
     S: PollStore + Send + Sync,
 {
+    debug!(poll_id, "record_commit request start");
     let poll = state.store.get_poll(poll_id).await?;
     let now = Utc::now();
     if now >= poll.commit_phase_end {
@@ -546,7 +572,10 @@ where
     {
         return Err(AppError::Validation("not a member of this poll".into()));
     }
-    let path = state.store.merkle_path_for_member(poll_id, &identity_secret).await?;
+    let path = state
+        .store
+        .merkle_path_for_member(poll_id, &identity_secret)
+        .await?;
     tracing::debug!(
         poll_id,
         username,
@@ -592,6 +621,7 @@ where
     S: PollStore + Send + Sync,
     B: ZkBackend + Send + Sync,
 {
+    debug!(poll_id, "generate_proof request");
     let poll = state.store.get_poll(poll_id).await?;
     if Utc::now() >= poll.reveal_phase_end {
         return Err(AppError::Validation("poll already resolved".into()));
@@ -616,6 +646,7 @@ where
     S: PollStore + Send + Sync,
     B: ZkBackend + Send + Sync,
 {
+    debug!(poll_id, "reveal_vote request");
     let poll = state.store.get_poll(poll_id).await?;
     let now = Utc::now();
     if now < poll.commit_phase_end || now >= poll.reveal_phase_end {
@@ -653,6 +684,7 @@ where
 {
     let poll = state.store.get_poll(poll_id).await?;
     let username = extract_username(&headers)?;
+    debug!(poll_id, username, "membership_status request");
     let (is_member, path) = if let Some(ref u) = username {
         let id = derive_identity_secret(&u, &state.identity_salt);
         let m = state.store.merkle_path_for_member(poll_id, &id).await?;
@@ -691,6 +723,7 @@ where
 {
     let username = extract_username(&headers)?
         .ok_or_else(|| AppError::Validation("missing auth header".into()))?;
+    debug!(poll_id, username, "commit_status request");
     let identity = derive_identity_secret(&username, &state.identity_salt);
     let already = state.store.has_commit(poll_id, &identity).await?;
     Ok(Json(CommitStatusResponse {
@@ -707,6 +740,7 @@ where
     S: PollStore + Send + Sync,
     B: ZkBackend + Send + Sync,
 {
+    debug!(user = %body.username, "login request");
     // Demo: accept any username/password and issue a simple token
     if body.username.is_empty() || body.password.is_empty() {
         return Err(AppError::Validation("username/password required".into()));
@@ -725,6 +759,7 @@ where
 async fn me(headers: axum::http::HeaderMap) -> Result<Json<MeResponse>, AppError> {
     let username = extract_username(&headers)?
         .ok_or_else(|| AppError::Validation("missing auth header".into()))?;
+    debug!(username, "me request");
     // We don't have state here; reuse the same salt used at app init
     let identity = derive_identity_secret(&username, IDENTITY_SALT.get().unwrap());
     Ok(Json(MeResponse {
@@ -768,7 +803,11 @@ fn derive_identity_secret(username: &str, salt: &str) -> String {
     hasher.update(salt.as_bytes());
     hasher.update(username.as_bytes());
     let out = hasher.finalize();
-    format!("0x{}", hex::encode(out))
+    let value = BigUint::from_bytes_be(&out);
+    let modulus =
+        BigUint::parse_bytes(BN254_FR_MODULUS.as_bytes(), 10).expect("valid BN254 modulus");
+    let reduced = value % modulus;
+    reduced.to_str_radix(10)
 }
 
 fn to_response(record: PollRecord) -> PollResponse {

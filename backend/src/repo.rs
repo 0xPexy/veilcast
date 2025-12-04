@@ -10,7 +10,7 @@ use tokio::process::Command;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-const MERKLE_SCRIPT: &str = "./scripts/poseidon_merkle.mjs";
+const MERKLE_SCRIPT: &str = "./scripts/poseidon_merkle_noir.mjs";
 const MERKLE_DEPTH: u32 = 20;
 
 pub(crate) fn hash_members(members: &[String]) -> String {
@@ -428,9 +428,7 @@ impl PollStore for PgStore {
         poll_id: i64,
         identity_secret: &str,
     ) -> AppResult<Option<MerklePath>> {
-        let members = self
-            .poll_member_list(poll_id)
-            .await?;
+        let members = self.poll_member_list(poll_id).await?;
         if members.is_empty() {
             return Ok(None);
         }
