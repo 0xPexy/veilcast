@@ -1,234 +1,280 @@
 # VeilCast
 
-Anonymous forecasting, XP, and “prophet” ranks — without real-money betting.
+zk-powered anonymous forecasting, XP, and “prophet” ranks — without real‑money betting.
 
-VeilCast is a lightweight prediction & voting playground where people can make bold forecasts **without exposing their identity or wallet**, then earn **XP and ranks** when they’re right.
-
----
-
-## What is VeilCast?
-
-VeilCast lets you:
-
-- Join **prediction polls** on real-world or crypto events  
-  (e.g. *“BTC will hit 150k before 2027”*, *“Layer X will flip Layer Y in TVL”*).
-- Vote **anonymously**: your choice is hidden during the commit period.
-- See results only **after the poll closes** (commit–reveal).
-- Gain **XP** when your prediction is correct.
-- Climb through **fun ranks** (e.g. *“Rookie Seer” → “Prophet” → “God-tier”*).
-
-No real-money bets. No on-chain doxxing of your opinions.  
-Just a clean space to test your intuition and build a “forecasting profile”.
+VeilCast is a small playground for making bold predictions **without exposing your identity or wallet**, then earning **XP and ranks** when you’re right.
 
 ---
 
-## Why?
+## Highlights (for blockchain / infra engineers)
 
-Open on-chain voting and prediction markets are powerful, but they have two big issues:
+- **EVM smart contracts with zk integration**  
+  - `VeilCastPolls.sol` implements commit–reveal polls, nullifier-based 1p1v, and a Noir-generated Solidity verifier for zk proofs.  
+  - Batch reveal path (`batchReveal`) shows how to design gas-aware on-chain aggregation.
 
-1. **Everything is public forever**  
-   Your wallet and your political / market opinions get linked on-chain.  
-   People self-censor or avoid participating.
+- **Off-chain backend, indexer, and relayer in Rust**  
+  - Axum + SQLx API server (poll CRUD, commit, membership, profile, leaderboard).  
+  - `ethers-rs` WebSocket indexer consumes on-chain events and keeps Postgres in sync.  
+  - A background relayer submits batched reveal transactions and records tx hashes.
 
-2. **High friction (and risk) when money is involved**  
-   Real USDC bets → regulatory risk, anxiety, and less playful experimentation.
+- **ZK membership and commitments**  
+  - Poseidon2-based Merkle tree over `identity_secret`s for anonymous group membership.  
+  - Noir circuit proves membership + commitment/nullifier consistency + choice validity (0/1).
 
-VeilCast tries a different angle:
+- **Frontend that actually generates proofs**  
+  - React + TypeScript app uses `@noir-lang/noir_js` and `@aztec/bb.js` in the browser to build proofs before sending them to the backend.  
+  - Polymarket-style UX for commit/reveal, plus XP/profile/leaderboard views.
 
-- **Anonymous votes**: who voted what is hidden; only aggregate results are public.
-- **XP instead of money**: the “reward” is reputation and ranks, not profit/loss.
-- **Time-locked results**: you can’t see the crowd’s bias before the poll closes  
-  → fewer bandwagon and herding effects.
-
-It’s a small lab for **honest forecasting and social fun**, not a trading venue.
-
----
-
-## Core Concepts
-
-### 1. Anonymous, One-Person-One-Vote
-
-Each poll is **1 person, 1 vote** — but anonymous:
-
-- Membership in a “voting group” is proven via cryptography (Merkle tree + ZK).
-- On-chain, the contract only sees:
-  - A **commitment hash** during the commit phase.
-  - A **nullifier** during reveal to ensure you only vote once.
-- No address or identity is tied to a specific choice publicly.
-
-Result:  
-You can be brutally honest about your view, without worrying who’s watching.
+- **Containerized monorepo**  
+  - Contracts, backend, frontend, and Postgres wired together via Docker Compose for reproducible local runs and demos.
 
 ---
 
-### 2. Commit–Reveal: Time-Locked Polls
+## Demo
 
-Each poll has three phases:
+- 🎥 YouTube demo:  
+  https://www.youtube.com/watch?v=pXMQvaYvws0
 
-1. **Commit phase**  
-   - You choose an option (e.g. *Yes / No*).  
-   - Your vote is hashed and recorded as a **commitment**.  
-   - Nobody (including you, from the outside) can see the actual tally.
+The demo walks through a full end‑to‑end flow:
 
-2. **Reveal phase**  
-   - After the commit deadline, you (or the relayer) reveal your choice.  
-   - The contract checks:
-     - The hash matches the original commitment.
-     - Your **nullifier** hasn’t been used before (no double voting).
-   - Votes are added to the public tally.
-
-3. **Resolve phase**  
-   - Once the real-world outcome is known, the poll creator sets the **correct option**.  
-   - At that point, XP can be calculated and awarded.
-
-Until the reveal/resolve stage, the “wisdom of the crowd” stays behind the veil —  
-perfect for **sports results, macro events, or spicy governance topics**.
+- Creating polls about live BTC/ETH market behavior  
+- Client‑side proof generation (Noir + bb.js in the browser)  
+- On‑chain reveal via a relayer, and  
+- XP scoring + leaderboard updates in the backend.
 
 ---
 
-### 3. XP & Ranks 
+## Product tour (screenshots)
 
-VeilCast has a simple XP system:
+All screenshots live under `images/` in this repo.
 
-- When you **predict correctly**, you earn XP.
-- XP pushes you through **ranks** that show your long-term forecasting skill.
+### Home — explore active polls
 
-Example (placeholder) rank ladder:
+![VeilCast Home](images/veilcast_home.jpg)
 
-- 0–49 XP: *Unknown Seer*  
-- 50–149 XP: *Rookie Diviner*  
-- 150–299 XP: *Rising Oracle*  
-- 300–599 XP: *Seasoned Prophet*  
-- 600+ XP: *God-tier Visionary* 🔮
+- See active and resolved polls grouped by category (macro, crypto, sports, culture, …).
+- For each poll you get:
+  - Question, category, and phase (Commit / Reveal / Resolved)
+  - Remaining time until the next phase
+  - A quick status line (e.g. “Reveal in progress, waiting for relayer”).
 
-The exact numbers and names can evolve, but the core ideas:
-
-- **Rank = reputation**, not buying power.
-- Your **opinions are anonymous**, but your **track record is visible**.
-- Over time, a profile becomes:  
-  *“This person is often right about L2s and Bitcoin cycles, even if we never see who they are.”*
+From here you jump into a specific poll detail page.
 
 ---
 
-## Example Scenarios
+### Poll detail — question, phases, and eligibility
 
-### Crypto & Markets
+![Poll Detail](images/veilcast_poll.jpg)
 
-- *“BTC will touch 150k before Dec 31, 2027.”*  
-- *“EigenLayer TVL will exceed \$50B by the end of 2026.”*  
-- *“Rollup X will flip Rollup Y in daily active users in 2025.”*
+- Full question text and options (binary in v1: e.g. *Yes / No*).
+- Clear timeline: commit end, reveal end, resolution status.
+- Membership snapshot:
+  - The backend computes a Poseidon‑based Merkle root over the currently eligible users.
+  - The UI tells you whether your account is in the snapshot and allowed to vote.
 
-### Sports & Culture
-
-- *“Team A will take the championship this season.”*  
-- *“Oscar for Best Picture will go to film X.”*
-
-### Governance & Social
-
-- *“DAO proposal #123 will pass with >60% yes.”*  
-- *“New L2 will overtake Optimistic rollups in weekly active addresses next year.”*
+If you’re eligible and the poll is in the commit phase, you can lock in a vote.
 
 ---
 
-## How a User Flows Through VeilCast
+### Commit — lock in an anonymous vote
 
-1. **Join / prove membership**  
-   - Get added to the voting group (membership proof, ZK-friendly).
+![Commit](images/veilcast_commit.jpg)
 
-2. **Browse Polls**
-   - See active prediction polls with:
-     - Question
-     - Options
-     - Commit / reveal / resolve timelines
+In the commit phase:
 
-3. **Commit Your Vote**
-   - During commit phase, select your choice and click “Commit”.
-   - Your commitment is stored; nobody can see what you picked.
+- You pick an option (e.g. *Yes* / *No*) via simple buttons, not raw indices.
+- The client:
+  - Fetches your identity secret and poll‑specific secret from the backend,
+  - Computes a zk‑friendly commitment and nullifier using Poseidon2,
+  - Generates a Noir proof **in the browser**, and
+  - Sends the commitment + proof to the backend.
+- The backend stores commitments in Postgres and enforces:
+  - One commitment per poll per user (off‑chain 1p1v safety net),
+  - Commit window checks against poll deadlines.
 
-4. **Reveal & Watch the Outcome**
-   - After commit closes, reveal phase opens.
-   - Your vote is revealed and included in the tally.
-   - Once the real-world result is known, the poll is resolved.
-
-5. **Earn XP & Level Up**
-   - If you were right, you gain XP.
-   - Your rank badge updates (e.g. from *Rookie Diviner* to *Rising Oracle*).
-   - Over time, your profile becomes a public record of your forecasting skill.
+A single user can commit once per poll; the UI shows when you’ve already committed.
 
 ---
 
-## What VeilCast Is **Not**
+### Reveal — relayer batch submit on-chain
 
-- ❌ A real-money prediction market  
-  - No USDC deposits, no leverage, no on-chain trading.
-- ❌ A KYC-heavy, regulated derivatives exchange  
-  - It’s meant as a **playground** for signals, not a financial product.
-- ❌ A public doxxing machine for your beliefs  
-  - The whole design is to **separate identity from individual votes**.
+![Reveal](images/veilcast_reveal.jpg)
 
----
+After the commit window closes:
 
-## Long-Term Vision (Beyond v1)
+- A Rust relayer process:
+  - Reads unrevealed commitments from the DB,
+  - Batches them into a `batchReveal` call to the `VeilCastPolls` contract,
+  - Submits a single reveal transaction on‑chain.
+- The contract:
+  - Verifies each Noir proof with the Solidity verifier,
+  - Checks nullifiers to prevent double voting,
+  - Increments per‑option vote counts.
 
-VeilCast v1 focuses on:
-
-- Simple binary/multi-choice polls,
-- Anonymous 1-person-1-vote,
-- XP & ranks for correct predictions.
-
-In the future, it could evolve into:
-
-- **More advanced scoring rules** (proper scoring, probability forecasts).
-- **Quadratic voting** for intensity of preference.
-- **Topic-based reputation** (e.g. “Macro God”, “AI Prophet”, “DeFi Oracle”).
-- **Integration with on-chain governance / DAOs** as a “private signal layer”.
+The UI links to the reveal transaction on Etherscan (e.g. `View reveal tx`) so you can verify the on‑chain side of the flow.
 
 ---
 
-## Tech Snapshot (High-Level Only)
+### Resolve — set the outcome and finalize scores
 
-Just to know what’s under the hood (without going too dev-y):
+![Resolve](images/veilcast_resolve.jpg)
 
-- **Smart Contracts**: Ethereum-compatible contracts (Foundry)  
-  handle polls, commit–reveal, and tallying.
-- **Backend / Relayer**: Rust server  
-  generates proofs, talks to the chain, and manages XP & profiles.
-- **Frontend**: React + TypeScript  
-  for poll discovery, voting UX, and XP/rank visualization.
-- **Privacy Building Blocks**:  
-  Merkle trees, nullifiers, and zk-friendly flows for anonymous group membership.
+Once the real‑world outcome is known and the reveal phase is done:
 
----
+- Only the poll owner can call `resolve`:
+  - Picks the correct option index,
+  - The contract marks the poll as resolved.
+- The backend:
+  - Reads final vote counts per option,
+  - Applies a simple XP policy:
+    - Participation XP for everyone who voted,
+    - Extra XP for those who picked the correct option.
+  - Updates `user_stats` (XP, total votes, correct votes, tier).
 
-## Status
+The poll detail page then shows:
 
-> **Day 1 — Infra & Monorepo skeleton**
-
-We’re starting with the core foundations:
-
-- Monorepo structure (contracts + backend + frontend),
-- Local dev network, and
-- Minimal UI/API wiring.
-
-The goal for the first version:  
-**a fully working anonymous prediction flow + XP ladder**,  
-even if the UI and scoring rules are still simple.
-
-Stay tuned — the veil will lift soon. 👁‍🗨
+- Final percentages (e.g. `Yes 67% / No 33%`), and  
+- A clear banner stating the correct outcome.
 
 ---
 
-## Dev Quickstart (Infra)
+### Profile — your anonymous forecasting track record
 
-- Bring everything up with Makefile: `make up` (uses `infra/docker-compose.yml` and `.env.*` files).
-- Stop stack: `make down`.
-- Services:
-  - `backend`: `RPC_URL` from `infra/.env.backend` (default `http://localhost:8545`), port `8000:8000`.
-  - `frontend`: `VITE_API_BASE` from `infra/.env.frontend` (default `http://localhost:8000`), port `5173:5173`.
-- Foundry-only image (no auto chain):
-  - Build: `docker build -t veilcast-foundry contracts`
-  - Local tests: `docker run --rm -it -v $(pwd)/contracts:/app veilcast-foundry forge test`
-  - Testnet deploy: `docker run --rm -it -v $(pwd)/contracts:/app -e RPC_URL=$RPC_URL -e PRIVATE_KEY=$PK veilcast-foundry forge script <script> --rpc-url $RPC_URL --private-key $PRIVATE_KEY --broadcast`
-- Hot reload: compose mounts `../backend` and `../frontend`, so code changes reflect inside containers.
-- Logs: `cd infra && docker compose logs -f backend` (or `frontend`).
-- Frontend auth: demo login is plain username/password (any values) → backend returns a bearer token. Use the “Login” page instead of wallet connect for now.
+![Profile](images/veilcast_profile.jpg)
+
+The profile page is your anonymous “forecasting CV”:
+
+- XP total and current tier (e.g. *Apprentice*, *Gold Seer*, *Master Oracle*).
+- Total votes vs correct votes and derived win‑rate.
+- A list of recent polls you participated in, with:
+  - Your choice,
+  - Final outcome,
+  - XP gained.
+
+Wallets/identities stay behind ZK primitives; the profile only exposes performance.
+
+---
+
+### Leaderboard — top anonymous forecasters
+
+![Leaderboard](images/veilcast_leaderboard.jpg)
+
+The leaderboard page aggregates `user_stats`:
+
+- Sorted by XP (tie‑breakers by win‑rate).
+- Shows:
+  - Username (pseudonymous),
+  - XP,
+  - Tier,
+  - Total and correct votes.
+
+You can see the overall “prophet food chain” without ever revealing who the humans are behind each handle.
+
+---
+
+## How VeilCast works (conceptually)
+
+1. **Membership & identity**
+   - The backend maintains a set of members, each with an `identity_secret`.
+   - When a poll is created, the backend takes a snapshot:
+     - Poseidon2‑based Merkle tree over current `identity_secret`s,
+     - Stores the root as `membershipRoot` on‑chain.
+   - The Noir circuit proves:
+     - You are in that Merkle tree,
+     - Without revealing your exact leaf.
+
+2. **Commit**
+   - Client chooses `choice ∈ {0,1}`.
+   - Computes:
+     - `commitment = Poseidon2(choice, secret)`
+     - `nullifier  = Poseidon2(identity_secret, poll_id)`
+   - Sends `(commitment, nullifier, proof)` to the backend; backend stores commitment off‑chain.
+
+3. **Reveal (relayer)**
+   - After commit ends, the relayer:
+     - Fetches unrevealed commitments,
+     - Calls the on‑chain `batchReveal` with proof bytes and public inputs.
+   - Contract:
+     - Verifies proofs,
+     - Checks `nullifierUsed[pollId][nullifier] == false`,
+     - Increments `votes[pollId][choiceIndex]`.
+
+4. **Resolve & XP**
+   - Poll owner sets `correctOption`.
+   - Backend walks all commitments for that poll:
+     - Updates XP and tiers in `user_stats`.
+
+---
+
+## Tech stack
+
+- **Contracts**
+  - `VeilCastPolls.sol` (Foundry / Solidity, commit–reveal polls, 1p1v via nullifiers)
+  - Noir‑generated Solidity verifier (`Verifier.sol`) for the zk circuit
+
+- **ZK**
+  - Noir circuit for:
+    - Merkle membership
+    - Commitment/nullifier consistency
+    - Choice validity (0/1)
+  - `@noir-lang/noir_js` + `@aztec/bb.js` in the browser to generate proofs
+
+- **Backend**
+  - Rust (`axum`, `sqlx`, `ethers-rs`)
+  - Responsibilities:
+    - API server (poll CRUD, commit, membership, profile, leaderboard)
+    - ZK helper integration and membership Merkle path generation
+    - On‑chain indexer + reveal relayer
+    - XP engine + leaderboard and backfill jobs
+
+- **Frontend**
+  - React + TypeScript + Vite
+  - Tailwind CSS for layout / styling
+  - Wagmi/web3 stack prepared for wallet integrations (v1 is username/password demo login)
+
+- **Infra**
+  - Docker + docker‑compose (`infra/docker-compose.yml`)
+  - Separate containers for:
+    - Postgres
+    - Rust backend
+    - React frontend
+  - Local Noir/bb tooling under `zk/` and `contracts/script/zk`.
+
+---
+
+## Dev quickstart
+
+From the monorepo root:
+
+```bash
+# Start everything via docker-compose
+cd infra
+docker compose up --build
+```
+
+Or run each piece manually:
+
+```bash
+# Postgres via docker, for example
+cd infra
+docker compose up -d db
+
+# Backend
+cd backend
+DATABASE_URL=postgres://veilcast:veilcast@localhost:5432/veilcast cargo run
+
+# Frontend
+cd frontend
+npm install
+npm run dev
+```
+
+Notes:
+
+- Backend config is driven by `infra/.env.backend` (RPC URLs, contract addresses, etc.).
+- Frontend config is in `infra/.env.frontend` (API base URL).
+- For contract work:
+  - Build a Foundry image: `docker build -t veilcast-foundry contracts`
+  - Run tests: `docker run --rm -it -v $(pwd)/contracts:/app veilcast-foundry forge test`
+
+For more backend‑specific details (indexer, XP engine, demo seeding), see `backend/README.md`. For zk circuit and verifier generation, see `zk/` and `contracts/script/zk`.
