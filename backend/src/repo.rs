@@ -1,6 +1,8 @@
 use crate::error::{AppError, AppResult};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
+use num_bigint::BigUint;
+use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{postgres::PgPoolOptions, Pool, Postgres, Row};
@@ -8,10 +10,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::process::Command;
 use tokio::sync::RwLock;
+use tracing::info;
 use uuid::Uuid;
 
 const MERKLE_SCRIPT: &str = "./scripts/poseidon_merkle_noir.mjs";
 const MERKLE_DEPTH: u32 = 20;
+const BN254_FR_MODULUS: &str =
+    "21888242871839275222246405745257275088548364400416034343698204186575808495617";
+const XP_CORRECT: i64 = 20;
+const XP_PARTICIPATION: i64 = 5;
 
 pub(crate) fn hash_members(members: &[String]) -> String {
     if members.is_empty() {
@@ -24,6 +31,27 @@ pub(crate) fn hash_members(members: &[String]) -> String {
     format!("0x{}", hex::encode(hasher.finalize()))
 }
 
+fn generate_secret() -> String {
+    let mut buf = [0u8; 32];
+    OsRng.fill_bytes(&mut buf);
+    let mut value = BigUint::from_bytes_be(&buf);
+    let modulus = BigUint::parse_bytes(BN254_FR_MODULUS.as_bytes(), 10).expect("valid modulus");
+    value %= modulus;
+    value.to_str_radix(10)
+}
+
+fn tier_for_xp(xp: i64) -> &'static str {
+    match xp {
+        x if x >= 1500 => "Mythic Prophet",
+        x if x >= 900 => "Master Oracle",
+        x if x >= 600 => "Gold Seer",
+        x if x >= 350 => "Silver Sage",
+        x if x >= 150 => "Bronze Adept",
+        x if x >= 50 => "Apprentice",
+        _ => "Seedling",
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PollRecord {
     pub id: i64,
@@ -33,9 +61,22 @@ pub struct PollRecord {
     pub reveal_phase_end: DateTime<Utc>,
     pub category: String,
     pub membership_root: String,
+    pub owner: String,
+    pub reveal_tx_hash: String,
     pub correct_option: Option<i16>,
     pub resolved: bool,
     pub commit_sync_completed: bool,
+    pub vote_counts: Vec<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UserStatsRecord {
+    pub identity_secret: String,
+    pub username: String,
+    pub xp: i64,
+    pub total_votes: i64,
+    pub correct_votes: i64,
+    pub tier: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -46,6 +87,7 @@ pub struct NewPoll<'a> {
     pub reveal_phase_end: DateTime<Utc>,
     pub membership_root: &'a str,
     pub category: &'a str,
+    pub owner: &'a str,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -54,6 +96,7 @@ pub struct StoredCommit<'a> {
     pub choice: i16,
     pub commitment: &'a str,
     pub identity_secret: &'a str,
+    pub secret: &'a str,
     pub nullifier: &'a str,
     pub proof: &'a str,
     pub public_inputs: &'a [String],
@@ -66,6 +109,7 @@ pub struct StoredCommitRecord {
     pub choice: i16,
     pub commitment: String,
     pub identity_secret: String,
+    pub secret: String,
     pub recorded_at: DateTime<Utc>,
     pub nullifier: String,
     pub proof: String,
@@ -92,6 +136,7 @@ pub struct CommitSyncRow {
     pub poll_id: i64,
     pub choice: i16,
     pub commitment: String,
+    pub secret: String,
     pub nullifier: String,
     pub proof: String,
     pub public_inputs: Vec<String>,
@@ -131,10 +176,12 @@ pub trait PollStore {
         identity_secret: &str,
     ) -> AppResult<Option<MerklePath>>;
     async fn list_members(&self) -> AppResult<Vec<String>>;
-    async fn ensure_member(&self, identity_secret: &str) -> AppResult<()>;
+    async fn ensure_member(&self, username: &str, identity_secret: &str) -> AppResult<()>;
     async fn poll_includes_member(&self, poll_id: i64, identity_secret: &str) -> AppResult<bool>;
     async fn nullifier_used(&self, poll_id: i64, nullifier: &str) -> AppResult<bool>;
     async fn has_commit(&self, poll_id: i64, identity_secret: &str) -> AppResult<bool>;
+    async fn resolve_poll(&self, poll_id: i64, correct_option: u8) -> AppResult<PollRecord>;
+    async fn get_or_create_secret(&self, poll_id: i64, identity_secret: &str) -> AppResult<String>;
     async fn commits_to_sync(
         &self,
         now: DateTime<Utc>,
@@ -143,7 +190,11 @@ pub trait PollStore {
     async fn mark_commit_synced(&self, commit_id: i64) -> AppResult<()>;
     async fn poll_has_pending_commits(&self, poll_id: i64) -> AppResult<bool>;
     async fn mark_poll_sync_complete(&self, poll_id: i64) -> AppResult<()>;
+    async fn set_reveal_tx_hash(&self, poll_id: i64, tx: &str) -> AppResult<()>;
     async fn mark_polls_without_pending_commits(&self, now: DateTime<Utc>) -> AppResult<()>;
+    async fn backfill_user_stats(&self) -> AppResult<()>;
+    async fn user_stats(&self, identity_secret: &str) -> AppResult<UserStatsRecord>;
+    async fn leaderboard(&self, limit: i64) -> AppResult<Vec<UserStatsRecord>>;
 }
 
 #[async_trait]
@@ -173,6 +224,128 @@ impl PgStore {
             .map_err(AppError::Db)?;
         init_schema(&pool).await?;
         Ok(Self { pool })
+    }
+
+    async fn populate_vote_counts(&self, records: &mut [PollRecord]) -> AppResult<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let mut counts_map: HashMap<i64, Vec<i64>> = records
+            .iter()
+            .map(|r| (r.id, vec![0; r.options.len()]))
+            .collect();
+        let ids: Vec<i64> = counts_map.keys().cloned().collect();
+        let rows = sqlx::query(
+            r#"SELECT poll_id, choice, COUNT(*)::BIGINT as count FROM votes WHERE poll_id = ANY($1) GROUP BY poll_id, choice"#,
+        )
+        .bind(&ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AppError::Db)?;
+        for row in rows {
+            let poll_id: i64 = row.get("poll_id");
+            let choice: i16 = row.get("choice");
+            let count: i64 = row.get("count");
+            if let Some(vec) = counts_map.get_mut(&poll_id) {
+                let idx = choice as usize;
+                if idx < vec.len() {
+                    vec[idx] = count;
+                }
+            }
+        }
+        let fallback_ids: Vec<i64> = records
+            .iter()
+            .filter_map(|r| {
+                counts_map
+                    .get(&r.id)
+                    .filter(|vec| vec.iter().all(|&c| c == 0))
+                    .map(|_| r.id)
+            })
+            .collect();
+        if !fallback_ids.is_empty() {
+            let rows = sqlx::query(
+                r#"SELECT poll_id, choice, COUNT(*)::BIGINT as count FROM commitments WHERE poll_id = ANY($1) GROUP BY poll_id, choice"#,
+            )
+            .bind(&fallback_ids)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(AppError::Db)?;
+            for row in rows {
+                let poll_id: i64 = row.get("poll_id");
+                let choice: i16 = row.get("choice");
+                let count: i64 = row.get("count");
+                if let Some(vec) = counts_map.get_mut(&poll_id) {
+                    let idx = choice as usize;
+                    if idx < vec.len() {
+                        vec[idx] = count;
+                    }
+                }
+            }
+        }
+        for record in records.iter_mut() {
+            if let Some(vec) = counts_map.remove(&record.id) {
+                record.vote_counts = vec;
+            }
+        }
+        Ok(())
+    }
+
+    async fn apply_poll_results(&self, poll_id: i64, correct_option: u8) -> AppResult<()> {
+        let commits =
+            sqlx::query(r#"SELECT identity_secret, choice FROM commitments WHERE poll_id = $1"#)
+                .bind(poll_id)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(AppError::Db)?;
+
+        for commit in commits {
+            let identity_secret: String = commit.get("identity_secret");
+            let choice: i16 = commit.get("choice");
+            let correct = choice as u8 == correct_option;
+            self.bump_user_stats(&identity_secret, correct).await?;
+        }
+        Ok(())
+    }
+
+    async fn bump_user_stats(&self, identity_secret: &str, correct: bool) -> AppResult<()> {
+        let xp_delta = if correct {
+            XP_CORRECT
+        } else {
+            XP_PARTICIPATION
+        };
+        let correct_inc = if correct { 1 } else { 0 };
+        let updated = sqlx::query(
+            r#"
+            UPDATE user_stats
+            SET xp = xp + $2,
+                total_votes = total_votes + 1,
+                correct_votes = correct_votes + $3,
+                updated_at = now()
+            WHERE identity_secret = $1
+            RETURNING xp, tier
+            "#,
+        )
+        .bind(identity_secret)
+        .bind(xp_delta)
+        .bind(correct_inc)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AppError::Db)?;
+
+        if let Some(row) = updated {
+            let xp: i64 = row.get("xp");
+            let current_tier: String = row.get("tier");
+            let new_tier = tier_for_xp(xp);
+            if new_tier != current_tier {
+                sqlx::query(r#"UPDATE user_stats SET tier = $2 WHERE identity_secret = $1"#)
+                    .bind(identity_secret)
+                    .bind(new_tier)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(AppError::Db)?;
+            }
+        }
+        Ok(())
     }
 
     async fn poll_member_list(&self, poll_id: i64) -> AppResult<Vec<String>> {
@@ -257,16 +430,18 @@ impl PgStore {
         let mut tx = self.pool.begin().await.map_err(AppError::Db)?;
         let rec = sqlx::query_as::<_, DbPoll>(
             r#"
-            INSERT INTO polls (id, question, options, commit_phase_end, reveal_phase_end, category, membership_root, commit_sync_completed)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, false)
+            INSERT INTO polls (id, question, options, commit_phase_end, reveal_phase_end, category, membership_root, owner, reveal_tx_hash, commit_sync_completed)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false)
             ON CONFLICT (id) DO UPDATE SET
                 question = EXCLUDED.question,
                 options = EXCLUDED.options,
                 commit_phase_end = EXCLUDED.commit_phase_end,
                 reveal_phase_end = EXCLUDED.reveal_phase_end,
                 category = EXCLUDED.category,
-                membership_root = EXCLUDED.membership_root
-            RETURNING id, question, options, commit_phase_end, reveal_phase_end, category, membership_root, correct_option, resolved, commit_sync_completed
+                membership_root = EXCLUDED.membership_root,
+                owner = EXCLUDED.owner,
+                reveal_tx_hash = EXCLUDED.reveal_tx_hash
+            RETURNING id, question, options, commit_phase_end, reveal_phase_end, category, membership_root, owner, reveal_tx_hash, correct_option, resolved, commit_sync_completed
             "#,
         )
         .bind(poll_id)
@@ -276,6 +451,8 @@ impl PgStore {
         .bind(poll.reveal_phase_end)
         .bind(poll.category)
         .bind(membership_root)
+        .bind(poll.owner)
+        .bind("") // initial reveal tx hash
         .fetch_one(&mut *tx)
         .await
         .map_err(AppError::Db)?;
@@ -311,7 +488,9 @@ impl PgStore {
         }
 
         tx.commit().await.map_err(AppError::Db)?;
-        Ok(rec.into())
+        let mut record: PollRecord = rec.into();
+        record.vote_counts = vec![0; record.options.len()];
+        Ok(record)
     }
 }
 
@@ -340,7 +519,7 @@ impl PollStore for PgStore {
     async fn list_polls(&self, limit: i64) -> AppResult<Vec<PollRecord>> {
         let rows = sqlx::query_as::<_, DbPoll>(
             r#"
-            SELECT id, question, options, commit_phase_end, reveal_phase_end, category, membership_root, correct_option, resolved, commit_sync_completed
+            SELECT id, question, options, commit_phase_end, reveal_phase_end, category, membership_root, owner, reveal_tx_hash, correct_option, resolved, commit_sync_completed
             FROM polls
             ORDER BY id DESC
             LIMIT $1
@@ -350,13 +529,15 @@ impl PollStore for PgStore {
         .fetch_all(&self.pool)
         .await
         .map_err(AppError::Db)?;
-        Ok(rows.into_iter().map(Into::into).collect())
+        let mut records: Vec<PollRecord> = rows.into_iter().map(Into::into).collect();
+        self.populate_vote_counts(&mut records).await?;
+        Ok(records)
     }
 
     async fn get_poll(&self, poll_id: i64) -> AppResult<PollRecord> {
         let rec = sqlx::query_as::<_, DbPoll>(
             r#"
-            SELECT id, question, options, commit_phase_end, reveal_phase_end, category, membership_root, correct_option, resolved, commit_sync_completed
+            SELECT id, question, options, commit_phase_end, reveal_phase_end, category, membership_root, owner, reveal_tx_hash, correct_option, resolved, commit_sync_completed
             FROM polls
             WHERE id = $1
             "#,
@@ -367,7 +548,12 @@ impl PollStore for PgStore {
         .map_err(AppError::Db)?;
 
         match rec {
-            Some(row) => Ok(row.into()),
+            Some(row) => {
+                let mut record: PollRecord = row.into();
+                self.populate_vote_counts(std::slice::from_mut(&mut record))
+                    .await?;
+                Ok(record)
+            }
             None => Err(AppError::NotFound),
         }
     }
@@ -375,15 +561,16 @@ impl PollStore for PgStore {
     async fn record_commit(&self, commit: StoredCommit<'_>) -> AppResult<StoredCommitRecord> {
         let rec = sqlx::query_as::<_, DbCommit>(
             r#"
-            INSERT INTO commitments (poll_id, choice, commitment, identity_secret, nullifier, proof, public_inputs)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            RETURNING id, poll_id, choice, commitment, identity_secret, nullifier, proof, public_inputs, recorded_at
+            INSERT INTO commitments (poll_id, choice, commitment, identity_secret, secret, nullifier, proof, public_inputs)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING id, poll_id, choice, commitment, identity_secret, secret, nullifier, proof, public_inputs, recorded_at
             "#,
         )
         .bind(commit.poll_id)
         .bind(commit.choice)
         .bind(commit.commitment)
         .bind(commit.identity_secret)
+        .bind(commit.secret)
         .bind(commit.nullifier)
         .bind(commit.proof)
         .bind(commit.public_inputs)
@@ -439,7 +626,7 @@ impl PollStore for PgStore {
         Ok(merkle.paths.get(identity_secret).cloned())
     }
 
-    async fn ensure_member(&self, identity_secret: &str) -> AppResult<()> {
+    async fn ensure_member(&self, username: &str, identity_secret: &str) -> AppResult<()> {
         sqlx::query(
             r#"
             INSERT INTO members (identity_secret)
@@ -448,6 +635,20 @@ impl PollStore for PgStore {
             "#,
         )
         .bind(identity_secret)
+        .execute(&self.pool)
+        .await
+        .map_err(AppError::Db)?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO user_stats (identity_secret, username)
+            VALUES ($1, $2)
+            ON CONFLICT (identity_secret)
+            DO UPDATE SET username = EXCLUDED.username, updated_at = now()
+            "#,
+        )
+        .bind(identity_secret)
+        .bind(username)
         .execute(&self.pool)
         .await
         .map_err(AppError::Db)?;
@@ -496,6 +697,66 @@ impl PollStore for PgStore {
         Ok(row.is_some())
     }
 
+    async fn get_or_create_secret(&self, poll_id: i64, identity_secret: &str) -> AppResult<String> {
+        if let Some(existing) = sqlx::query_scalar::<_, String>(
+            r#"SELECT secret FROM poll_secrets WHERE poll_id = $1 AND identity_secret = $2 LIMIT 1"#,
+        )
+        .bind(poll_id)
+        .bind(identity_secret)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AppError::Db)?
+        {
+            return Ok(existing);
+        }
+
+        let secret = generate_secret();
+        sqlx::query(
+            r#"
+            INSERT INTO poll_secrets (poll_id, identity_secret, secret)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (poll_id, identity_secret) DO NOTHING
+            "#,
+        )
+        .bind(poll_id)
+        .bind(identity_secret)
+        .bind(&secret)
+        .execute(&self.pool)
+        .await
+        .map_err(AppError::Db)?;
+
+        let saved = sqlx::query_scalar::<_, String>(
+            r#"SELECT secret FROM poll_secrets WHERE poll_id = $1 AND identity_secret = $2 LIMIT 1"#,
+        )
+        .bind(poll_id)
+        .bind(identity_secret)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AppError::Db)?;
+        Ok(saved)
+    }
+
+    async fn resolve_poll(&self, poll_id: i64, correct_option: u8) -> AppResult<PollRecord> {
+        let rec = sqlx::query_as::<_, DbPoll>(
+            r#"
+            UPDATE polls
+            SET resolved = true, correct_option = $2
+            WHERE id = $1
+            RETURNING id, question, options, commit_phase_end, reveal_phase_end, category, membership_root, owner, reveal_tx_hash, correct_option, resolved, commit_sync_completed
+            "#,
+        )
+        .bind(poll_id)
+        .bind(correct_option as i16)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AppError::Db)?;
+        let mut record: PollRecord = rec.into();
+        self.apply_poll_results(poll_id, correct_option).await?;
+        self.populate_vote_counts(std::slice::from_mut(&mut record))
+            .await?;
+        Ok(record)
+    }
+
     async fn commits_to_sync(
         &self,
         now: DateTime<Utc>,
@@ -503,7 +764,7 @@ impl PollStore for PgStore {
     ) -> AppResult<Vec<CommitSyncRow>> {
         let rows = sqlx::query_as::<_, CommitSyncRow>(
             r#"
-            SELECT c.id::BIGINT as id, c.poll_id, c.choice, c.commitment, c.nullifier, c.proof, c.public_inputs
+            SELECT c.id::BIGINT as id, c.poll_id, c.choice, c.commitment, c.secret, c.nullifier, c.proof, c.public_inputs
             FROM commitments c
             JOIN polls p ON p.id = c.poll_id
             WHERE p.commit_phase_end <= $1
@@ -561,6 +822,20 @@ impl PollStore for PgStore {
         Ok(())
     }
 
+    async fn set_reveal_tx_hash(&self, poll_id: i64, tx: &str) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE polls SET reveal_tx_hash = $2, commit_sync_completed = true WHERE id = $1
+            "#,
+        )
+        .bind(poll_id)
+        .bind(tx)
+        .execute(&self.pool)
+        .await
+        .map_err(AppError::Db)?;
+        Ok(())
+    }
+
     async fn mark_polls_without_pending_commits(&self, now: DateTime<Utc>) -> AppResult<()> {
         sqlx::query(
             r#"
@@ -581,6 +856,95 @@ impl PollStore for PgStore {
         .map_err(AppError::Db)?;
         Ok(())
     }
+
+    async fn backfill_user_stats(&self) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE user_stats
+            SET xp = 0,
+                total_votes = 0,
+                correct_votes = 0,
+                tier = $1,
+                updated_at = now()
+            "#,
+        )
+        .bind(tier_for_xp(0))
+        .execute(&self.pool)
+        .await
+        .map_err(AppError::Db)?;
+
+        let polls = sqlx::query(
+            r#"SELECT id, correct_option FROM polls WHERE resolved = true AND correct_option IS NOT NULL"#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AppError::Db)?;
+
+        for row in polls {
+            let poll_id: i64 = row.get("id");
+            let correct: i16 = row.get("correct_option");
+            self.apply_poll_results(poll_id, correct as u8).await?;
+        }
+        Ok(())
+    }
+
+    async fn user_stats(&self, identity_secret: &str) -> AppResult<UserStatsRecord> {
+        let row = sqlx::query(
+            r#"SELECT identity_secret, username, xp, total_votes, correct_votes, tier FROM user_stats WHERE identity_secret = $1"#,
+        )
+        .bind(identity_secret)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AppError::Db)?;
+
+        if let Some(row) = row {
+            Ok(UserStatsRecord {
+                identity_secret: row.get("identity_secret"),
+                username: row.get("username"),
+                xp: row.get("xp"),
+                total_votes: row.get("total_votes"),
+                correct_votes: row.get("correct_votes"),
+                tier: row.get("tier"),
+            })
+        } else {
+            Ok(UserStatsRecord {
+                identity_secret: identity_secret.to_string(),
+                username: identity_secret.to_string(),
+                xp: 0,
+                total_votes: 0,
+                correct_votes: 0,
+                tier: tier_for_xp(0).to_string(),
+            })
+        }
+    }
+
+    async fn leaderboard(&self, limit: i64) -> AppResult<Vec<UserStatsRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT identity_secret, username, xp, total_votes, correct_votes, tier
+            FROM user_stats
+            ORDER BY xp DESC, correct_votes DESC, username ASC
+            LIMIT $1
+            "#,
+        )
+        .bind(limit.max(1))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AppError::Db)?;
+
+        let entries = rows
+            .into_iter()
+            .map(|row| UserStatsRecord {
+                identity_secret: row.get("identity_secret"),
+                username: row.get("username"),
+                xp: row.get("xp"),
+                total_votes: row.get("total_votes"),
+                correct_votes: row.get("correct_votes"),
+                tier: row.get("tier"),
+            })
+            .collect();
+        Ok(entries)
+    }
 }
 
 #[async_trait]
@@ -588,8 +952,8 @@ impl PollIndexSink for PgStore {
     async fn upsert_poll_from_chain(&self, poll_id: i64, poll: NewPoll<'_>) -> AppResult<()> {
         sqlx::query(
             r#"
-            INSERT INTO polls (id, question, options, commit_phase_end, reveal_phase_end, membership_root, category, resolved)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, false)
+            INSERT INTO polls (id, question, options, commit_phase_end, reveal_phase_end, membership_root, category, owner, resolved)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false)
             ON CONFLICT (id) DO UPDATE SET
               question = EXCLUDED.question,
               options = EXCLUDED.options,
@@ -606,6 +970,7 @@ impl PollIndexSink for PgStore {
         .bind(poll.reveal_phase_end)
         .bind(poll.membership_root)
         .bind(poll.category)
+        .bind(poll.owner)
         .execute(&self.pool)
         .await
         .map_err(AppError::Db)?;
@@ -647,6 +1012,7 @@ impl PollIndexSink for PgStore {
         .execute(&self.pool)
         .await
         .map_err(AppError::Db)?;
+        self.apply_poll_results(poll_id, correct_option).await?;
         Ok(())
     }
 }
@@ -660,6 +1026,8 @@ struct DbPoll {
     reveal_phase_end: DateTime<Utc>,
     category: String,
     membership_root: String,
+    owner: String,
+    reveal_tx_hash: String,
     correct_option: Option<i16>,
     resolved: bool,
     commit_sync_completed: bool,
@@ -676,9 +1044,12 @@ impl From<DbPoll> for PollRecord {
             reveal_phase_end: value.reveal_phase_end,
             category: value.category,
             membership_root: value.membership_root,
+            owner: value.owner,
+            reveal_tx_hash: value.reveal_tx_hash,
             correct_option: value.correct_option,
             resolved: value.resolved,
             commit_sync_completed: value.commit_sync_completed,
+            vote_counts: Vec::new(),
         }
     }
 }
@@ -691,6 +1062,7 @@ struct DbCommit {
     commitment: String,
     recorded_at: DateTime<Utc>,
     identity_secret: String,
+    secret: String,
     nullifier: String,
     proof: String,
     public_inputs: Vec<String>,
@@ -705,6 +1077,7 @@ impl From<DbCommit> for StoredCommitRecord {
             commitment: value.commitment,
             recorded_at: value.recorded_at,
             identity_secret: value.identity_secret,
+            secret: value.secret,
             nullifier: value.nullifier,
             proof: value.proof,
             public_inputs: value.public_inputs,
@@ -742,6 +1115,8 @@ pub struct InMemoryStore {
     commits_by_identity: Arc<RwLock<HashMap<(i64, String), ()>>>,
     synced_commits: Arc<RwLock<HashSet<i64>>>,
     commit_seq: Arc<RwLock<i64>>,
+    poll_secrets: Arc<RwLock<HashMap<(i64, String), String>>>,
+    user_stats: Arc<RwLock<HashMap<String, UserStatsRecord>>>,
 }
 
 impl Default for InMemoryStore {
@@ -756,6 +1131,8 @@ impl Default for InMemoryStore {
             commits_by_identity: Arc::new(RwLock::new(HashMap::new())),
             synced_commits: Arc::new(RwLock::new(HashSet::new())),
             commit_seq: Arc::new(RwLock::new(0)),
+            poll_secrets: Arc::new(RwLock::new(HashMap::new())),
+            user_stats: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
@@ -766,6 +1143,69 @@ impl InMemoryStore {
         let mut members = self.members.write().await;
         if !members.contains(&identity_secret.to_string()) {
             members.push(identity_secret.to_string());
+        }
+        let mut stats = self.user_stats.write().await;
+        stats
+            .entry(identity_secret.to_string())
+            .or_insert(UserStatsRecord {
+                identity_secret: identity_secret.to_string(),
+                username: identity_secret.to_string(),
+                xp: 0,
+                total_votes: 0,
+                correct_votes: 0,
+                tier: tier_for_xp(0).to_string(),
+            });
+    }
+
+    async fn bump_user_stats_local(&self, identity_secret: &str, correct: bool) {
+        let mut stats = self.user_stats.write().await;
+        let entry = stats
+            .entry(identity_secret.to_string())
+            .or_insert(UserStatsRecord {
+                identity_secret: identity_secret.to_string(),
+                username: identity_secret.to_string(),
+                xp: 0,
+                total_votes: 0,
+                correct_votes: 0,
+                tier: tier_for_xp(0).to_string(),
+            });
+        entry.total_votes += 1;
+        if correct {
+            entry.correct_votes += 1;
+        }
+        entry.xp += if correct {
+            XP_CORRECT
+        } else {
+            XP_PARTICIPATION
+        };
+        entry.tier = tier_for_xp(entry.xp).to_string();
+    }
+
+    async fn finalize_poll_results(&self, poll_id: i64, correct_option: u8) {
+        let commits: Vec<StoredCommitRecord> = {
+            let commits = self.commits.read().await;
+            commits
+                .iter()
+                .filter(|c| c.poll_id == poll_id)
+                .cloned()
+                .collect()
+        };
+        {
+            let mut polls = self.polls.write().await;
+            if let Some(poll) = polls.get_mut(&poll_id) {
+                poll.vote_counts = vec![0; poll.options.len()];
+                for commit in &commits {
+                    let idx = commit.choice as usize;
+                    if idx < poll.vote_counts.len() {
+                        poll.vote_counts[idx] += 1;
+                    }
+                }
+            }
+        }
+        for commit in commits {
+            let correct = commit.choice as u8 == correct_option;
+            self.bump_user_stats_local(&commit.identity_secret, correct)
+                .await;
         }
     }
 }
@@ -795,9 +1235,12 @@ impl PollStore for InMemoryStore {
             reveal_phase_end: poll.reveal_phase_end,
             category: poll.category.to_string(),
             membership_root: membership_root.clone(),
+            owner: poll.owner.to_string(),
+            reveal_tx_hash: String::new(),
             correct_option: None,
             resolved: false,
             commit_sync_completed: false,
+            vote_counts: vec![0; poll.options.len()],
         };
         polls.insert(poll_id, record.clone());
         self.poll_members.write().await.insert(poll_id, members);
@@ -838,6 +1281,7 @@ impl PollStore for InMemoryStore {
             choice: commit.choice,
             commitment: commit.commitment.to_string(),
             identity_secret: commit.identity_secret.to_string(),
+            secret: commit.secret.to_string(),
             recorded_at: Utc::now(),
             nullifier: commit.nullifier.to_string(),
             proof: commit.proof.to_string(),
@@ -868,6 +1312,18 @@ impl PollStore for InMemoryStore {
             .write()
             .await
             .insert((vote.poll_id, vote.nullifier.to_string()), ());
+        {
+            let mut polls = self.polls.write().await;
+            if let Some(poll) = polls.get_mut(&vote.poll_id) {
+                if poll.vote_counts.len() < poll.options.len() {
+                    poll.vote_counts.resize(poll.options.len(), 0);
+                }
+                let idx = vote.choice as usize;
+                if idx < poll.vote_counts.len() {
+                    poll.vote_counts[idx] += 1;
+                }
+            }
+        }
         Ok(rec)
     }
 
@@ -888,11 +1344,23 @@ impl PollStore for InMemoryStore {
         Ok(None)
     }
 
-    async fn ensure_member(&self, identity_secret: &str) -> AppResult<()> {
+    async fn ensure_member(&self, _username: &str, identity_secret: &str) -> AppResult<()> {
         let mut members = self.members.write().await;
         if !members.contains(&identity_secret.to_string()) {
             members.push(identity_secret.to_string());
         }
+        let mut stats = self.user_stats.write().await;
+        stats
+            .entry(identity_secret.to_string())
+            .or_insert(UserStatsRecord {
+                identity_secret: identity_secret.to_string(),
+                username: _username.to_string(),
+                xp: 0,
+                total_votes: 0,
+                correct_votes: 0,
+                tier: tier_for_xp(0).to_string(),
+            })
+            .username = _username.to_string();
         Ok(())
     }
 
@@ -913,6 +1381,29 @@ impl PollStore for InMemoryStore {
     async fn has_commit(&self, poll_id: i64, identity_secret: &str) -> AppResult<bool> {
         let seen = self.commits_by_identity.read().await;
         Ok(seen.contains_key(&(poll_id, identity_secret.to_string())))
+    }
+
+    async fn get_or_create_secret(&self, poll_id: i64, identity_secret: &str) -> AppResult<String> {
+        let key = (poll_id, identity_secret.to_string());
+        let mut secrets = self.poll_secrets.write().await;
+        if let Some(existing) = secrets.get(&key) {
+            return Ok(existing.clone());
+        }
+        let secret = generate_secret();
+        secrets.insert(key, secret.clone());
+        Ok(secret)
+    }
+
+    async fn resolve_poll(&self, poll_id: i64, correct_option: u8) -> AppResult<PollRecord> {
+        {
+            let mut polls = self.polls.write().await;
+            let poll = polls.get_mut(&poll_id).ok_or(AppError::NotFound)?;
+            poll.resolved = true;
+            poll.correct_option = Some(correct_option as i16);
+        }
+        self.finalize_poll_results(poll_id, correct_option).await;
+        let polls = self.polls.read().await;
+        polls.get(&poll_id).cloned().ok_or(AppError::NotFound)
     }
 
     async fn commits_to_sync(
@@ -938,6 +1429,7 @@ impl PollStore for InMemoryStore {
                         poll_id: commit.poll_id,
                         choice: commit.choice,
                         commitment: commit.commitment.clone(),
+                        secret: commit.secret.clone(),
                         nullifier: commit.nullifier.clone(),
                         proof: commit.proof.clone(),
                         public_inputs: commit.public_inputs.clone(),
@@ -950,6 +1442,15 @@ impl PollStore for InMemoryStore {
 
     async fn mark_commit_synced(&self, commit_id: i64) -> AppResult<()> {
         self.synced_commits.write().await.insert(commit_id);
+        Ok(())
+    }
+
+    async fn set_reveal_tx_hash(&self, poll_id: i64, tx: &str) -> AppResult<()> {
+        let mut polls = self.polls.write().await;
+        if let Some(p) = polls.get_mut(&poll_id) {
+            p.reveal_tx_hash = tx.to_string();
+            p.commit_sync_completed = true;
+        }
         Ok(())
     }
 
@@ -970,6 +1471,33 @@ impl PollStore for InMemoryStore {
         Ok(())
     }
 
+    async fn backfill_user_stats(&self) -> AppResult<()> {
+        {
+            let mut stats = self.user_stats.write().await;
+            for entry in stats.values_mut() {
+                entry.xp = 0;
+                entry.total_votes = 0;
+                entry.correct_votes = 0;
+                entry.tier = tier_for_xp(0).to_string();
+            }
+        }
+        let poll_entries: Vec<(i64, Option<i16>, bool)> = {
+            let polls = self.polls.read().await;
+            polls
+                .iter()
+                .map(|(id, poll)| (*id, poll.correct_option, poll.resolved))
+                .collect()
+        };
+        for (poll_id, correct_option, resolved) in poll_entries {
+            if resolved {
+                if let Some(correct) = correct_option {
+                    self.finalize_poll_results(poll_id, correct as u8).await;
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn mark_polls_without_pending_commits(&self, now: DateTime<Utc>) -> AppResult<()> {
         let commits = self.commits.read().await;
         let synced = self.synced_commits.read().await;
@@ -985,6 +1513,34 @@ impl PollStore for InMemoryStore {
             }
         }
         Ok(())
+    }
+
+    async fn user_stats(&self, identity_secret: &str) -> AppResult<UserStatsRecord> {
+        let stats = self.user_stats.read().await;
+        if let Some(entry) = stats.get(identity_secret) {
+            Ok(entry.clone())
+        } else {
+            Ok(UserStatsRecord {
+                identity_secret: identity_secret.to_string(),
+                username: identity_secret.to_string(),
+                xp: 0,
+                total_votes: 0,
+                correct_votes: 0,
+                tier: tier_for_xp(0).to_string(),
+            })
+        }
+    }
+
+    async fn leaderboard(&self, limit: i64) -> AppResult<Vec<UserStatsRecord>> {
+        let mut entries: Vec<UserStatsRecord> =
+            self.user_stats.read().await.values().cloned().collect();
+        entries.sort_by(|a, b| {
+            b.xp.cmp(&a.xp)
+                .then_with(|| b.correct_votes.cmp(&a.correct_votes))
+                .then_with(|| a.username.cmp(&b.username))
+        });
+        entries.truncate(limit.max(1) as usize);
+        Ok(entries)
     }
 }
 
@@ -1002,9 +1558,12 @@ impl PollIndexSink for InMemoryStore {
                 reveal_phase_end: poll.reveal_phase_end,
                 category: poll.category.to_string(),
                 membership_root: poll.membership_root.to_string(),
+                owner: poll.owner.to_string(),
+                reveal_tx_hash: String::new(),
                 correct_option: None,
                 resolved: false,
                 commit_sync_completed: false,
+                vote_counts: vec![0; poll.options.len()],
             },
         );
         Ok(())
@@ -1025,11 +1584,14 @@ impl PollIndexSink for InMemoryStore {
     }
 
     async fn resolve_poll_from_chain(&self, poll_id: i64, correct_option: u8) -> AppResult<()> {
-        let mut polls = self.polls.write().await;
-        if let Some(p) = polls.get_mut(&poll_id) {
-            p.resolved = true;
-            p.correct_option = Some(correct_option as i16);
+        {
+            let mut polls = self.polls.write().await;
+            if let Some(p) = polls.get_mut(&poll_id) {
+                p.resolved = true;
+                p.correct_option = Some(correct_option as i16);
+            }
         }
+        self.finalize_poll_results(poll_id, correct_option).await;
         Ok(())
     }
 }

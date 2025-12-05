@@ -9,6 +9,12 @@ export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
 }
 
+export function getUsernameFromToken(): string | null {
+  const token = getToken();
+  if (!token) return null;
+  return token.startsWith('token:') ? token.slice('token:'.length) : token;
+}
+
 export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(IDENTITY_KEY);

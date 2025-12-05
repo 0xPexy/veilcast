@@ -55,14 +55,30 @@ pub struct PollResponse {
     pub reveal_phase_end: DateTime<Utc>,
     pub category: String,
     pub membership_root: String,
+    pub owner: String,
+    pub reveal_tx_hash: String,
     pub correct_option: Option<i16>,
     pub resolved: bool,
+    pub commit_sync_completed: bool,
     pub phase: Phase,
+    pub vote_counts: Vec<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ResolveRequest {
+    pub correct_option: u8,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct SecretResponse {
+    pub poll_id: i64,
+    pub secret: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CommitRequest {
     pub choice: u8,
+    pub secret: String,
     pub commitment: String,
     pub nullifier: String,
     pub proof: String,
@@ -135,4 +151,16 @@ pub struct LoginResponse {
 pub struct MeResponse {
     pub username: String,
     pub identity_secret: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct UserStatsResponse {
+    pub username: String,
+    pub tier: String,
+    pub xp: i64,
+    pub total_votes: i64,
+    pub correct_votes: i64,
+    pub accuracy: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rank: Option<u32>,
 }

@@ -102,6 +102,7 @@ where
         let options_owned = ev.options.clone();
         let membership_owned = ev.membership_root.to_string();
         let category_owned = "General".to_string();
+        let owner_owned = String::new();
         let np = NewPoll {
             question: &question_owned,
             options: &options_owned,
@@ -109,6 +110,7 @@ where
             reveal_phase_end: reveal_end,
             membership_root: &membership_owned,
             category: &category_owned,
+            owner: &owner_owned,
         };
         store.upsert_poll_from_chain(poll_id, np).await?;
         info!("Indexed PollCreated poll_id={}", poll_id);

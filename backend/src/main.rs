@@ -11,16 +11,17 @@ use crate::indexer::{spawn_indexer, IndexerConfig, PollCreatedEvent};
 #[cfg(test)]
 use crate::repo::InMemoryStore;
 use crate::repo::{
-    CommitSyncRow, MerklePath, NewPoll, PgStore, PollRecord, PollStore, StoredCommit, StoredVote,
+    CommitSyncRow, NewPoll, PgStore, PollRecord, PollStore, StoredCommit, StoredVote,
+    UserStatsRecord,
 };
 use crate::types::{
     CommitRequest, CommitResponse, CommitStatusResponse, CreatePollRequest, CreatePollResponse,
     LoginRequest, LoginResponse, MeResponse, MembershipStatusResponse, Phase, PollResponse,
-    ProveRequest, RevealRequest, RevealResponse,
+    ProveRequest, ResolveRequest, RevealRequest, RevealResponse, SecretResponse, UserStatsResponse,
 };
 use crate::zk::{NoopZkBackend, ProofBundle, ProofRequest, ZkBackend};
 use async_trait::async_trait;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -34,6 +35,7 @@ use ethers::signers::{LocalWallet, Signer};
 use hex;
 use num_bigint::BigUint;
 use once_cell::sync::OnceCell;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -59,7 +61,11 @@ abigen!(
 
 #[async_trait]
 pub trait OnchainRevealer: Send + Sync {
-    async fn submit_batch_reveal(&self, poll_id: i64, items: &[CommitSyncRow]) -> AppResult<()>;
+    async fn submit_batch_reveal(
+        &self,
+        poll_id: i64,
+        items: &[CommitSyncRow],
+    ) -> AppResult<Option<H256>>;
 }
 
 #[derive(Clone, Default)]
@@ -67,13 +73,17 @@ pub struct NoopRevealer;
 
 #[async_trait]
 impl OnchainRevealer for NoopRevealer {
-    async fn submit_batch_reveal(&self, poll_id: i64, items: &[CommitSyncRow]) -> AppResult<()> {
+    async fn submit_batch_reveal(
+        &self,
+        poll_id: i64,
+        items: &[CommitSyncRow],
+    ) -> AppResult<Option<H256>> {
         info!(
             poll_id,
             count = items.len(),
             "Simulating on-chain batch reveal"
         );
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -150,15 +160,33 @@ impl PollsContractClient {
     }
 }
 
-fn parse_h256_hex(value: &str) -> AppResult<H256> {
-    let hex_str = value.strip_prefix("0x").unwrap_or(value);
-    let bytes = hex::decode(hex_str)
-        .map_err(|e| AppError::Validation(format!("invalid bytes32 hex: {e}")))?;
-    if bytes.len() != 32 {
-        return Err(AppError::Validation("bytes32 must be 32 bytes".into()));
+fn parse_field_h256(value: &str) -> AppResult<H256> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(H256::zero());
+    }
+    let bytes = if let Some(hex_str) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        let hex_clean = if hex_str.len() % 2 == 1 {
+            format!("0{hex_str}")
+        } else {
+            hex_str.to_string()
+        };
+        hex::decode(hex_clean)
+            .map_err(|e| AppError::Validation(format!("invalid bytes32 hex: {e}")))?
+    } else {
+        let big = BigUint::from_str(trimmed)
+            .map_err(|e| AppError::Validation(format!("invalid decimal: {e}")))?;
+        big.to_bytes_be()
+    };
+    if bytes.len() > 32 {
+        return Err(AppError::Validation("bytes32 must be <= 32 bytes".into()));
     }
     let mut buf = [0u8; 32];
-    buf.copy_from_slice(&bytes);
+    let offset = 32 - bytes.len();
+    buf[offset..].copy_from_slice(&bytes);
     Ok(H256(buf))
 }
 
@@ -167,7 +195,10 @@ fn parse_field_u256(value: &str) -> AppResult<U256> {
     if trimmed.is_empty() {
         return Ok(U256::zero());
     }
-    if let Some(hex_str) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+    if let Some(hex_str) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
         if hex_str.is_empty() {
             return Ok(U256::zero());
         }
@@ -192,7 +223,11 @@ fn to_unix_u256(ts: chrono::DateTime<Utc>) -> AppResult<U256> {
 
 #[async_trait]
 impl OnchainRevealer for PollsContractClient {
-    async fn submit_batch_reveal(&self, poll_id: i64, items: &[CommitSyncRow]) -> AppResult<()> {
+    async fn submit_batch_reveal(
+        &self,
+        poll_id: i64,
+        items: &[CommitSyncRow],
+    ) -> AppResult<Option<H256>> {
         let poll_u256 = if poll_id < 0 {
             return Err(AppError::Validation("invalid poll id".into()));
         } else {
@@ -213,7 +248,7 @@ impl OnchainRevealer for PollsContractClient {
             proofs.push(Bytes::from(proof_bytes));
             let mut arr: Vec<[u8; 32]> = Vec::with_capacity(it.public_inputs.len());
             for p in &it.public_inputs {
-                let h = parse_h256_hex(p)?;
+                let h = parse_field_h256(p)?;
                 arr.push(h.0);
             }
             publics.push(arr);
@@ -231,10 +266,10 @@ impl OnchainRevealer for PollsContractClient {
             .send()
             .await
             .map_err(|e| AppError::External(format!("send batchReveal failed: {e}")))?;
-        pending
+        let receipt = pending
             .await
             .map_err(|e| AppError::External(format!("batchReveal pending failed: {e}")))?;
-        Ok(())
+        Ok(receipt.map(|r| r.transaction_hash))
     }
 }
 
@@ -262,12 +297,21 @@ where
         while !items.is_empty() {
             let chunk: Vec<CommitSyncRow> =
                 items.drain(0..items.len().min(REVEAL_BATCH_SIZE)).collect();
-            if let Err(err) = revealer.submit_batch_reveal(poll_id, &chunk).await {
-                error!(poll_id, ?err, "Failed to submit batch reveal");
-                break;
-            }
-            for it in &chunk {
-                store.mark_commit_synced(it.id).await?;
+            match revealer.submit_batch_reveal(poll_id, &chunk).await {
+                Ok(tx_opt) => {
+                    for it in &chunk {
+                        store.mark_commit_synced(it.id).await?;
+                    }
+                    if let Some(tx) = tx_opt {
+                        let _ = store
+                            .set_reveal_tx_hash(poll_id, &format!("{:#x}", tx))
+                            .await;
+                    }
+                }
+                Err(err) => {
+                    error!(poll_id, ?err, "Failed to submit batch reveal");
+                    break;
+                }
             }
         }
         if !store.poll_has_pending_commits(poll_id).await? {
@@ -377,6 +421,14 @@ async fn main() -> Result<(), AppError> {
         cfg.identity_salt.clone(),
         contract_client.clone(),
     );
+
+    if std::env::var("XP_BACKFILL").is_ok() {
+        info!("XP_BACKFILL flag detected, rebuilding user stats...");
+        store.backfill_user_stats().await?;
+        info!("XP backfill completed. Exiting.");
+        return Ok(());
+    }
+
     info!(
         "VeilCast backend initialized (rpc_url set: {}, contract set: {})",
         cfg.rpc_url.is_some(),
@@ -426,9 +478,13 @@ where
         .route("/polls/:id", get(get_poll::<S, B>))
         .route("/polls/:id/membership", get(membership_status::<S, B>))
         .route("/polls/:id/commit_status", get(commit_status::<S, B>))
+        .route("/polls/:id/secret", get(fetch_secret::<S, B>))
         .route("/polls/:id/commit", post(record_commit::<S, B>))
         .route("/polls/:id/prove", post(generate_proof::<S, B>))
         .route("/polls/:id/reveal", post(reveal_vote::<S, B>))
+        .route("/polls/:id/resolve", post(resolve_poll::<S, B>))
+        .route("/users/me/stats", get(me_stats::<S, B>))
+        .route("/leaderboard", get(leaderboard::<S, B>))
         .route("/auth/login", post(login::<S, B>))
         .route("/auth/me", get(me))
         .with_state(state)
@@ -440,6 +496,7 @@ async fn health() -> impl IntoResponse {
 
 async fn create_poll<S, B>(
     State(state): State<AppState<S, B>>,
+    headers: HeaderMap,
     Json(body): Json<CreatePollRequest>,
 ) -> Result<Json<CreatePollResponse>, AppError>
 where
@@ -460,6 +517,8 @@ where
             "commit end must be before reveal end".into(),
         ));
     }
+    let owner = extract_username(&headers)?
+        .ok_or_else(|| AppError::Validation("missing auth header".into()))?;
     let membership_root = state.store.membership_root_snapshot().await?;
     let options_owned = body.options.clone();
     let new_poll = NewPoll {
@@ -469,6 +528,7 @@ where
         reveal_phase_end: body.reveal_phase_end,
         membership_root: &membership_root,
         category: &body.category,
+        owner: &owner,
     };
 
     if let Some(contract) = state.contract.as_ref() {
@@ -565,6 +625,14 @@ where
     let username = extract_username(&headers)?
         .ok_or_else(|| AppError::Validation("missing auth header".into()))?;
     let identity_secret = derive_identity_secret(&username, &state.identity_salt);
+    // Fetch or mint per-poll secret server-side
+    let server_secret = state
+        .store
+        .get_or_create_secret(poll_id, &identity_secret)
+        .await?;
+    if body.secret != server_secret {
+        return Err(AppError::Validation("secret mismatch".into()));
+    }
     if !state
         .store
         .poll_includes_member(poll_id, &identity_secret)
@@ -595,6 +663,7 @@ where
             choice: body.choice as i16,
             commitment: &body.commitment,
             identity_secret: &identity_secret,
+            secret: &body.secret,
             nullifier: &body.nullifier,
             proof: &body.proof,
             public_inputs: &body.public_inputs,
@@ -674,6 +743,39 @@ where
     }))
 }
 
+async fn resolve_poll<S, B>(
+    State(state): State<AppState<S, B>>,
+    Path(poll_id): Path<i64>,
+    headers: HeaderMap,
+    Json(body): Json<ResolveRequest>,
+) -> Result<Json<PollResponse>, AppError>
+where
+    S: PollStore + Send + Sync,
+{
+    let username = extract_username(&headers)?
+        .ok_or_else(|| AppError::Validation("missing auth header".into()))?;
+    let poll = state.store.get_poll(poll_id).await?;
+    if poll.owner != username {
+        return Err(AppError::Validation("not poll owner".into()));
+    }
+    if poll.resolved {
+        return Err(AppError::Validation("poll already resolved".into()));
+    }
+    if Utc::now() < poll.reveal_phase_end {
+        return Err(AppError::Validation(
+            "cannot resolve before reveal phase ends".into(),
+        ));
+    }
+    if body.correct_option as usize >= poll.options.len() {
+        return Err(AppError::Validation("invalid correct option".into()));
+    }
+    let updated = state
+        .store
+        .resolve_poll(poll_id, body.correct_option)
+        .await?;
+    Ok(Json(to_response(updated)))
+}
+
 async fn membership_status<S, B>(
     State(state): State<AppState<S, B>>,
     Path(poll_id): Path<i64>,
@@ -713,6 +815,32 @@ where
     }))
 }
 
+async fn fetch_secret<S, B>(
+    State(state): State<AppState<S, B>>,
+    Path(poll_id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<Json<SecretResponse>, AppError>
+where
+    S: PollStore + Send + Sync,
+{
+    let username = extract_username(&headers)?
+        .ok_or_else(|| AppError::Validation("missing auth header".into()))?;
+    let _ = state.store.get_poll(poll_id).await?;
+    let identity_secret = derive_identity_secret(&username, &state.identity_salt);
+    if !state
+        .store
+        .poll_includes_member(poll_id, &identity_secret)
+        .await?
+    {
+        return Err(AppError::Validation("not a member of this poll".into()));
+    }
+    let secret = state
+        .store
+        .get_or_create_secret(poll_id, &identity_secret)
+        .await?;
+    Ok(Json(SecretResponse { poll_id, secret }))
+}
+
 async fn commit_status<S, B>(
     State(state): State<AppState<S, B>>,
     Path(poll_id): Path<i64>,
@@ -747,7 +875,7 @@ where
     }
     // Derive identity_secret from username + salt, upsert into members.
     let identity = derive_identity_secret(&body.username, &state.identity_salt);
-    state.store.ensure_member(&identity).await?;
+    state.store.ensure_member(&body.username, &identity).await?;
     let token = format!("token:{}", body.username);
     Ok(Json(LoginResponse {
         token,
@@ -766,6 +894,44 @@ async fn me(headers: axum::http::HeaderMap) -> Result<Json<MeResponse>, AppError
         username: username.clone(),
         identity_secret: identity,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct LeaderboardParams {
+    limit: Option<i64>,
+}
+
+async fn leaderboard<S, B>(
+    State(state): State<AppState<S, B>>,
+    Query(params): Query<LeaderboardParams>,
+) -> Result<Json<Vec<UserStatsResponse>>, AppError>
+where
+    S: PollStore + Send + Sync,
+    B: ZkBackend + Send + Sync,
+{
+    let limit = params.limit.unwrap_or(20).clamp(1, 100);
+    let records = state.store.leaderboard(limit).await?;
+    let responses = records
+        .into_iter()
+        .enumerate()
+        .map(|(idx, rec)| to_user_stats_response(rec, Some(idx + 1)))
+        .collect();
+    Ok(Json(responses))
+}
+
+async fn me_stats<S, B>(
+    State(state): State<AppState<S, B>>,
+    headers: HeaderMap,
+) -> Result<Json<UserStatsResponse>, AppError>
+where
+    S: PollStore + Send + Sync,
+    B: ZkBackend + Send + Sync,
+{
+    let username = extract_username(&headers)?
+        .ok_or_else(|| AppError::Validation("missing auth header".into()))?;
+    let identity = derive_identity_secret(&username, &state.identity_salt);
+    let stats = state.store.user_stats(&identity).await?;
+    Ok(Json(to_user_stats_response(stats, None)))
 }
 
 fn extract_choice(bundle: &ProofBundle) -> AppResult<u8> {
@@ -825,9 +991,30 @@ fn to_response(record: PollRecord) -> PollResponse {
         reveal_phase_end: record.reveal_phase_end,
         category: record.category,
         membership_root: record.membership_root,
+        owner: record.owner,
+        reveal_tx_hash: record.reveal_tx_hash,
         correct_option: record.correct_option,
         resolved: record.resolved,
+        commit_sync_completed: record.commit_sync_completed,
         phase,
+        vote_counts: record.vote_counts,
+    }
+}
+
+fn to_user_stats_response(record: UserStatsRecord, rank: Option<usize>) -> UserStatsResponse {
+    let accuracy = if record.total_votes > 0 {
+        (record.correct_votes as f64 / record.total_votes as f64) * 100.0
+    } else {
+        0.0
+    };
+    UserStatsResponse {
+        username: record.username,
+        tier: record.tier,
+        xp: record.xp,
+        total_votes: record.total_votes,
+        correct_votes: record.correct_votes,
+        accuracy,
+        rank: rank.map(|r| r as u32),
     }
 }
 
@@ -922,6 +1109,7 @@ mod tests {
                     .method("POST")
                     .uri("/polls")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer token:owner")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
             )
@@ -983,16 +1171,35 @@ mod tests {
                     .method("POST")
                     .uri("/polls")
                     .header("content-type", "application/json")
+                    .header("authorization", token)
                     .body(Body::from(create_body.to_string()))
                     .unwrap(),
             )
             .await
             .unwrap();
 
+        // fetch per-poll secret
+        let secret_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/polls/0/secret")
+                    .header("authorization", token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(secret_res.status(), StatusCode::OK);
+        let secret_body: SecretResponse =
+            serde_json::from_slice(&to_bytes(secret_res.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+
         // generate proof client-side equivalent via endpoint for test convenience
         let prove_body = serde_json::json!({
             "choice": 1,
-            "secret": "42",
+            "secret": secret_body.secret,
             "identity_secret": identity
         });
         let prove_res = app
@@ -1014,6 +1221,7 @@ mod tests {
 
         let commit_body = serde_json::json!({
             "choice": 1,
+            "secret": secret_body.secret,
             "commitment": bundle.commitment,
             "nullifier": bundle.nullifier,
             "proof": bundle.proof,
@@ -1068,9 +1276,9 @@ mod tests {
             &self,
             poll_id: i64,
             items: &[CommitSyncRow],
-        ) -> AppResult<()> {
+        ) -> AppResult<Option<H256>> {
             self.calls.lock().unwrap().push((poll_id, items.len()));
-            Ok(())
+            Ok(None)
         }
     }
 
@@ -1085,6 +1293,7 @@ mod tests {
                 reveal_phase_end: Utc::now() + chrono::Duration::minutes(5),
                 membership_root: "root",
                 category: "General",
+                owner: "tester",
             })
             .await
             .unwrap();
@@ -1094,6 +1303,7 @@ mod tests {
                 choice: 0,
                 commitment: "0x1",
                 identity_secret: "id1",
+                secret: "server-secret",
                 nullifier: "0x2",
                 proof: "0x00",
                 public_inputs: &vec!["0x0".to_string()],

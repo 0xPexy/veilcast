@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { createPoll } from '../lib/api';
+import { getToken } from '../lib/auth';
 
 interface FormState {
   question: string;
@@ -16,6 +17,7 @@ const pollCategories = ['General', 'Crypto', 'Macro', 'Sports', 'Governance', 'C
 
 export function CreatePollPage() {
   const navigate = useNavigate();
+  const token = getToken();
   const [form, setForm] = useState<FormState>({
     question: '',
     category: 'General',
@@ -28,7 +30,9 @@ export function CreatePollPage() {
   const [lastPollId, setLastPollId] = useState<number | null>(null);
   const ETHERSCAN_BASE = import.meta.env.VITE_ETHERSCAN_BASE || 'https://sepolia.etherscan.io';
 
-  const { mutateAsync, isPending, isSuccess, error } = useMutation({ mutationFn: createPoll });
+  const { mutateAsync, isPending, isSuccess, error } = useMutation({
+    mutationFn: (payload: Parameters<typeof createPoll>[0]) => createPoll(payload, token || undefined),
+  });
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -44,6 +48,9 @@ export function CreatePollPage() {
       category: form.category,
     };
     setTxLink(null);
+    if (!token) {
+      throw new Error('Login required to create polls');
+    }
     const result = await mutateAsync(payload);
     setLastPollId(result.poll.id);
     if (result.tx_hash) {
@@ -136,11 +143,12 @@ export function CreatePollPage() {
         <div className="flex items-center gap-3">
           <button
             type="submit"
-            disabled={isPending}
+            disabled={isPending || !token}
             className="rounded-full bg-gradient-to-r from-poseidon to-cyan px-5 py-2 text-sm font-semibold shadow-glow disabled:opacity-60"
           >
             {isPending ? 'Creating…' : 'Create poll'}
           </button>
+          {!token && <span className="text-sm text-white/60">Login required to create polls.</span>}
           {isSuccess && (
             <div className="flex flex-wrap items-center gap-3 text-sm text-cyan">
               <span>{lastPollId !== null ? `Poll #${lastPollId} created!` : 'Poll created!'}</span>

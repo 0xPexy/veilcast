@@ -3,12 +3,15 @@
 TRUNCATE TABLE votes RESTART IDENTITY CASCADE;
 TRUNCATE TABLE commitments RESTART IDENTITY CASCADE;
 TRUNCATE TABLE poll_members RESTART IDENTITY CASCADE;
+TRUNCATE TABLE poll_secrets RESTART IDENTITY CASCADE;
 TRUNCATE TABLE polls RESTART IDENTITY CASCADE;
 TRUNCATE TABLE members RESTART IDENTITY CASCADE;
+TRUNCATE TABLE user_stats RESTART IDENTITY CASCADE;
 ALTER SEQUENCE IF EXISTS polls_id_seq RESTART WITH 0;
 ALTER SEQUENCE IF EXISTS members_id_seq RESTART WITH 0;
 ALTER SEQUENCE IF EXISTS commitments_id_seq RESTART WITH 0;
 ALTER SEQUENCE IF EXISTS votes_id_seq RESTART WITH 0;
+ALTER SEQUENCE IF EXISTS poll_secrets_id_seq RESTART WITH 0;
 
 CREATE TABLE IF NOT EXISTS polls (
     id BIGSERIAL PRIMARY KEY,
@@ -19,12 +22,16 @@ CREATE TABLE IF NOT EXISTS polls (
     category TEXT NOT NULL DEFAULT 'General',
     commit_sync_completed BOOLEAN NOT NULL DEFAULT false,
     membership_root TEXT NOT NULL,
+    owner TEXT NOT NULL DEFAULT '',
+    reveal_tx_hash TEXT NOT NULL DEFAULT '',
     correct_option SMALLINT,
     resolved BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE polls ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'General';
 ALTER TABLE polls ADD COLUMN IF NOT EXISTS commit_sync_completed BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE polls ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL DEFAULT '';
+ALTER TABLE polls ADD COLUMN IF NOT EXISTS reveal_tx_hash TEXT NOT NULL DEFAULT '';
 UPDATE polls SET category = 'General' WHERE category IS NULL OR category = '';
 UPDATE polls SET commit_sync_completed = false WHERE commit_sync_completed IS NULL;
 
@@ -34,11 +41,23 @@ CREATE TABLE IF NOT EXISTS members (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS user_stats (
+    identity_secret TEXT PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    xp BIGINT NOT NULL DEFAULT 0,
+    total_votes BIGINT NOT NULL DEFAULT 0,
+    correct_votes BIGINT NOT NULL DEFAULT 0,
+    tier TEXT NOT NULL DEFAULT 'Seedling',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS commitments (
     id SERIAL PRIMARY KEY,
     poll_id BIGINT NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
     commitment TEXT NOT NULL,
     identity_secret TEXT NOT NULL,
+    secret TEXT NOT NULL DEFAULT '',
     recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     onchain_submitted BOOLEAN NOT NULL DEFAULT false
 );
@@ -52,6 +71,7 @@ BEGIN
     END IF;
 END$$;
 ALTER TABLE commitments ADD COLUMN IF NOT EXISTS onchain_submitted BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE commitments ADD COLUMN IF NOT EXISTS secret TEXT NOT NULL DEFAULT '';
 UPDATE commitments SET onchain_submitted = false WHERE onchain_submitted IS NULL;
 -- Backfill legacy rows to avoid duplicate identity_secret = '' when adding unique index
 UPDATE commitments SET identity_secret = commitment WHERE identity_secret IS NULL OR identity_secret = '';
@@ -77,6 +97,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS votes_poll_nullifier_idx ON votes(poll_id, nul
 CREATE TABLE IF NOT EXISTS poll_members (
     poll_id BIGINT NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
     identity_secret TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(poll_id, identity_secret)
+);
+
+CREATE TABLE IF NOT EXISTS poll_secrets (
+    id SERIAL PRIMARY KEY,
+    poll_id BIGINT NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+    identity_secret TEXT NOT NULL,
+    secret TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE(poll_id, identity_secret)
 );

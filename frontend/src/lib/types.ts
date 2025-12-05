@@ -7,14 +7,28 @@ export interface Poll {
   commit_phase_end: string;
   reveal_phase_end: string;
   membership_root: string;
+  owner: string;
+  reveal_tx_hash?: string;
   correct_option?: number | null;
   resolved: boolean;
   category: string;
+  commit_sync_completed: boolean;
+  vote_counts: number[];
 }
 
 export interface PollView extends Poll {
   phase: Phase;
   countdown: string;
+}
+
+export interface UserStats {
+  username: string;
+  tier: string;
+  xp: number;
+  total_votes: number;
+  correct_votes: number;
+  accuracy: number;
+  rank?: number;
 }
 
 export interface CreatePollResult {

@@ -29,6 +29,7 @@ http = "1"
 hyper = { version = "1", features = ["full"] }
 sha2 = "0.10"
 num-bigint = "0.4"
+rand = "0.8"
 ethers = { version = "2", default-features = false, features = [
     "abigen",
     "ws",

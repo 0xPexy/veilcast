@@ -7,9 +7,16 @@ import { fetchPolls } from '../lib/api';
 import { PollView } from '../lib/types';
 
 const categories = ['All', 'Crypto', 'Macro', 'Sports', 'Governance', 'General'];
+const phaseFilters = [
+  { key: 'all', label: 'All' },
+  { key: 'commit', label: 'Commit' },
+  { key: 'reveal', label: 'Reveal' },
+  { key: 'resolved', label: 'Resolved' },
+];
 
 export function HomePage() {
   const [activeCat, setActiveCat] = useState('All');
+  const [phaseFilter, setPhaseFilter] = useState<'all' | 'commit' | 'reveal' | 'resolved'>('all');
   const { data, isLoading, isError, refetch } = useQuery<PollView[]>({
     queryKey: ['polls'],
     queryFn: fetchPolls,
@@ -17,9 +24,12 @@ export function HomePage() {
 
   const filtered = useMemo(() => {
     if (!data) return [];
-    if (activeCat === 'All') return data;
-    return data.filter((p) => (p.category ?? 'General') === activeCat);
-  }, [data, activeCat]);
+    return data.filter((p) => {
+      const matchesCategory = activeCat === 'All' ? true : (p.category ?? 'General') === activeCat;
+      const matchesPhase = phaseFilter === 'all' ? true : p.phase === phaseFilter;
+      return matchesCategory && matchesPhase;
+    });
+  }, [data, activeCat, phaseFilter]);
 
   return (
     <div className="flex flex-col gap-8">
@@ -34,10 +44,21 @@ export function HomePage() {
           <CategoryFilter categories={categories} active={activeCat} onChange={setActiveCat} />
         </div>
 
-        <div className="flex items-center gap-3 text-sm text-white/60">
-          <div className="rounded-full bg-white/5 px-3 py-1">Commit window</div>
-          <div className="rounded-full bg-white/5 px-3 py-1">Reveal window</div>
-          <div className="rounded-full bg-white/5 px-3 py-1">Resolved (results only)</div>
+        <div className="flex flex-wrap items-center gap-2 text-sm text-white/60">
+          {phaseFilters.map((filter) => (
+            <button
+              key={filter.key}
+              type="button"
+              onClick={() => setPhaseFilter(filter.key as typeof phaseFilter)}
+              className={`rounded-full px-3 py-1 ${
+                phaseFilter === filter.key
+                  ? 'bg-gradient-to-r from-poseidon to-cyan text-white shadow-glow'
+                  : 'bg-white/5 text-white/70 hover:bg-white/10'
+              }`}
+            >
+              {filter.label}
+            </button>
+          ))}
         </div>
 
         {isLoading && <SkeletonGrid />}

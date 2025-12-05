@@ -1,4 +1,4 @@
-import { Poll, PollView, CommitStatus, MembershipStatus, CreatePollResult } from './types';
+import { Poll, PollView, CommitStatus, MembershipStatus, CreatePollResult, UserStats } from './types';
 import { computePhase, formatCountdown } from './time';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
@@ -51,16 +51,22 @@ export async function fetchCommitStatus(pollId: number, token: string): Promise<
   return res.json() as Promise<CommitStatus>;
 }
 
-export async function createPoll(body: {
-  question: string;
-  options: string[];
-  commit_phase_end: string;
-  reveal_phase_end: string;
-  category: string;
-}): Promise<CreatePollResult> {
+export async function createPoll(
+  body: {
+    question: string;
+    options: string[];
+    commit_phase_end: string;
+    reveal_phase_end: string;
+    category: string;
+  },
+  token?: string,
+): Promise<CreatePollResult> {
   const res = await fetch(`${API_BASE}/polls`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error('failed to create poll');
@@ -71,6 +77,7 @@ export async function commitVote(
   pollId: number,
   payload: {
     choice: number;
+    secret: string;
     commitment: string;
     nullifier: string;
     proof: string;
@@ -87,6 +94,16 @@ export async function commitVote(
     body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error('failed to commit');
+  return res.json();
+}
+
+export async function fetchSecret(pollId: number, token: string): Promise<{ poll_id: number; secret: string }> {
+  const res = await fetch(`${API_BASE}/polls/${pollId}/secret`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  if (!res.ok) throw new Error('failed to fetch secret');
   return res.json();
 }
 
@@ -113,6 +130,20 @@ export async function revealVote(
   return res.json();
 }
 
+export async function resolvePoll(pollId: number, correctOption: number, token: string) {
+  const res = await fetch(`${API_BASE}/polls/${pollId}/resolve`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ correct_option: correctOption }),
+  });
+  if (!res.ok) throw new Error('failed to resolve poll');
+  const data = (await res.json()) as Poll;
+  return withDerived([data])[0];
+}
+
 export async function login(username: string, password: string) {
   const res = await fetch(`${API_BASE}/auth/login`, {
     method: 'POST',
@@ -131,4 +162,20 @@ export async function me(token: string) {
   });
   if (!res.ok) throw new Error('unauthorized');
   return res.json() as Promise<{ username: string; identity_secret: string }>;
+}
+
+export async function fetchLeaderboard(limit = 20): Promise<UserStats[]> {
+  const res = await fetch(`${API_BASE}/leaderboard?limit=${limit}`);
+  if (!res.ok) throw new Error('failed to fetch leaderboard');
+  return res.json() as Promise<UserStats[]>;
+}
+
+export async function fetchProfileStats(token: string): Promise<UserStats> {
+  const res = await fetch(`${API_BASE}/users/me/stats`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  if (!res.ok) throw new Error('failed to fetch profile stats');
+  return res.json() as Promise<UserStats>;
 }

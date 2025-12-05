@@ -20,6 +20,14 @@ export function PollCard({ poll }: Props) {
     </div>
   ));
 
+  const secondaryLabel = (() => {
+    if (poll.phase === 'commit') return `Commit ends in ${poll.countdown}`;
+    if (poll.phase === 'reveal') {
+      return poll.commit_sync_completed ? 'Reveal done, waiting for resolve' : `Reveal ends in ${poll.countdown}`;
+    }
+    return poll.resolved ? 'Resolved' : 'Resolve pending';
+  })();
+
   return (
     <div className="glass relative flex flex-col gap-3 p-5">
       <div className="flex items-center justify-between gap-3">
@@ -33,23 +41,20 @@ export function PollCard({ poll }: Props) {
       <h3 className="text-lg font-semibold leading-tight">{poll.question}</h3>
       <div className="flex items-center gap-2 text-xs text-white/60">
         <Clock3 size={14} />
-        <span>
-          {poll.phase === 'commit'
-            ? `Commit ends in ${poll.countdown}`
-            : poll.phase === 'reveal'
-              ? `Reveal ends in ${poll.countdown}`
-              : 'Finished'}
-        </span>
+        <span>{secondaryLabel}</span>
       </div>
       <div className="flex flex-col gap-2">{bars}</div>
-      <div className="mt-2 flex items-center gap-2 text-xs text-white/50">
-        <Info size={14} />
+      <div className="group relative mt-2 flex w-fit items-center gap-2 text-xs text-white/50">
+        <Info size={14} className="text-white/70" />
         <span>Membership snapshot: {shorten(poll.membership_root)}</span>
+        <div className="pointer-events-none absolute left-0 top-full z-10 hidden w-52 rounded-lg border border-white/10 bg-black/80 p-2 text-[11px] text-white/80 group-hover:flex">
+          Captured allowlist root when this poll was created. Proofs must match this snapshot.
+        </div>
       </div>
       {poll.resolved && poll.correct_option != null && (
         <div className="flex items-center gap-2 rounded-lg bg-gradient-to-r from-poseidon/30 to-magenta/30 px-3 py-2 text-sm text-white">
           <Trophy size={16} />
-          Correct: Option {poll.correct_option}
+          Correct: {poll.options[poll.correct_option] ?? `Option ${poll.correct_option}`}
         </div>
       )}
       <div className="flex items-center justify-between pt-2">

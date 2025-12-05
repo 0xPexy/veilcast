@@ -22,6 +22,18 @@ cd infra
 docker compose up --build
 ```
 
+### Demo 데이터 시드
+로컬 데모 화면을 바로 보고 싶다면 backend 루트에서 아래 스크립트를 실행하세요.  
+`psql` 클라이언트가 필요하며 `DATABASE_URL`을 지정하지 않으면 `postgres://veilcast:veilcast@localhost:5432/veilcast`가 사용됩니다.  
+로컬에 `psql`이 없어도 Docker가 설치되어 있다면 자동으로 `docker compose exec db psql`을 사용합니다.
+```bash
+cd backend
+chmod +x scripts/seed_demo_data.sh # 최초 1회
+DATABASE_URL=postgres://veilcast:veilcast@localhost:5432/veilcast scripts/seed_demo_data.sh
+```
+스크립트는 2025년 9월 이후 이미 결론이 난 글로벌 이슈(Nvidia 시총 1위, Apple $4T, Bitcoin ATH/하락, Solana ETF, BoA 크립토 개방, 2025 World Series 등)를 다루는 resolved poll 7개와 데모 커밋/투표, 리더보드 데이터를 한 번에 만들어 줍니다.  
+시드가 끝나면 일반 `cargo run` 혹은 docker dev 프로파일을 그대로 실행하면 됩니다.
+
 ## 테스트
 ```bash
 cd backend

@@ -5,6 +5,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { createHash } from 'crypto';
 import { Noir } from '@noir-lang/noir_js';
 import { Barretenberg, Fr, BN254_FR_MODULUS } from '@aztec/bb.js';
 import { fileURLToPath } from 'url';
@@ -35,11 +36,11 @@ async function poseidon2Hash(bb, left, right) {
   return frToDec(result);
 }
 
-async function buildTree(members, depth) {
+async function buildTree(memberEntries, depth) {
   const bb = await Barretenberg.new(1);
 
   const leafHashes = await Promise.all(
-    members.map((m) => poseidon2Hash1(bb, m)),
+    memberEntries.map((entry) => poseidon2Hash1(bb, entry.field)),
   );
   const minimalSize = Math.max(1, 1 << Math.ceil(Math.log2(Math.max(1, leafHashes.length))));
   const leaves = [...leafHashes];
@@ -66,7 +67,7 @@ async function buildTree(members, depth) {
   const root = levels[depth][0];
 
   const paths = {};
-  for (let i = 0; i < members.length; i++) {
+  for (let i = 0; i < memberEntries.length; i++) {
     let idx = i;
     const bits = [];
     const siblings = [];
@@ -79,12 +80,25 @@ async function buildTree(members, depth) {
       idx = Math.floor(idx / 2);
       if (level.length === 1) idx = 0;
     }
-    paths[members[i]] = { bits, siblings };
+    paths[memberEntries[i].original] = { bits, siblings };
   }
 
   await bb.destroy();
   return { root, paths };
 }
+
+const normalizeMember = (value) => {
+  const raw = value?.toString().trim() ?? '';
+  if (!raw) return '0';
+  if (/^-?\d+$/.test(raw)) {
+    return mod(BigInt(raw)).toString();
+  }
+  if (/^0x[0-9a-fA-F]+$/.test(raw)) {
+    return mod(BigInt(raw)).toString();
+  }
+  const hash = createHash('sha256').update(raw).digest('hex');
+  return mod(BigInt(`0x${hash}`)).toString();
+};
 
 async function main() {
   const file = process.argv[2];
@@ -95,7 +109,10 @@ async function main() {
 
   const raw = fs.readFileSync(file, 'utf8');
   const parsed = JSON.parse(raw);
-  const members = (parsed.members || []).map((m) => m.toString());
+  const memberEntries = (parsed.members || []).map((m) => ({
+    original: m.toString(),
+    field: normalizeMember(m),
+  }));
   const depth = parsed.depth || DEFAULT_DEPTH;
 
   // Load circuit (optional sanity: ensure we use same version as veilcast)
@@ -108,7 +125,7 @@ async function main() {
     const noir = new Noir(circuit);
   }
 
-  const res = await buildTree(members, depth);
+  const res = await buildTree(memberEntries, depth);
   console.log(JSON.stringify({ ...res, depth }, null, 2));
 }
 
