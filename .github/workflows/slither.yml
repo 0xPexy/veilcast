@@ -1,11 +1,37 @@
 name: Slither Analysis
-on: [push]
+
+on:
+  push:
+    paths:
+      - 'contracts/src/**'
+      - 'contracts/test/**'
+      - 'contracts/foundry.toml'
+      - '.github/workflows/slither.yml'
+  pull_request:
+    paths:
+      - 'contracts/src/**'
+      - 'contracts/test/**'
+      - 'contracts/foundry.toml'
+      - '.github/workflows/slither.yml'
+
 jobs:
-  analyze:
+  slither:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
     steps:
-      - uses: actions/checkout@v4
-      - uses: crytic/slither-action@v0.4.1
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
         with:
+          version: nightly
+
+      - name: Run Slither
+        uses: crytic/slither-action@v0.4.1
+        with:
+          with:
           target: ./contracts/src/VeilCastPolls.sol
           config-file: ./contracts/slither.config.json
