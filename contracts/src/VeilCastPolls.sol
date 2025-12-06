@@ -163,7 +163,7 @@ contract VeilCastPolls is Ownable {
 
         nullifierUsed[pollId][nullifier] = true;
 
-        bool ok;
+        bool ok = false;
         try verifier.verify(proof, publicInputs) returns (bool success) {
             ok = success;
         } catch {
