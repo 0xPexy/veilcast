@@ -36,5 +36,4 @@ jobs:
         uses: crytic/slither-action@v0.3.1
         with:
           target: .
-          solc-version: 0.8.27
-          config-file: slither.config.json
+
