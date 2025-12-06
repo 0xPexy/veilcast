@@ -1,0 +1,40 @@
+name: Slither Analysis
+
+on:
+  push:
+    paths:
+      - 'contracts/src/**'
+      - 'contracts/test/**'
+      - 'contracts/foundry.toml'
+      - '.github/workflows/slither.yml'
+  pull_request:
+    paths:
+      - 'contracts/src/**'
+      - 'contracts/test/**'
+      - 'contracts/foundry.toml'
+      - '.github/workflows/slither.yml'
+
+jobs:
+  slither:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+
+      - name: Install npm dependencies
+        run: npm install
+
+      - name: Run Slither
+        uses: crytic/slither-action@v0.3.1
+        with:
+          target: .
+          solc-version: 0.8.27
+          config-file: slither.config.json
